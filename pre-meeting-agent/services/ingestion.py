@@ -381,4 +381,10 @@ async def ingest_company_data(request: BriefingRequest) -> FactBase:
         "conflicts": [],
     }
 
-    return FactBase.model_validate(payload)
+    fact_base = FactBase.model_validate(payload)
+
+    from .conflict_detection import detect_fact_conflicts
+
+    fact_base.conflicts = detect_fact_conflicts(fact_base)
+
+    return fact_base
