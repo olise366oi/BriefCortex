@@ -1,0 +1,5 @@
+﻿pydantic>=2
+tavily-python>=0.8
+tenacity>=9
+trafilatura>=2
+markdown>=3
