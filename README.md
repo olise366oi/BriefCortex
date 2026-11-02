@@ -13,7 +13,7 @@ Traditional briefing tools fail deal teams in two specific ways:
 1. **They have no sense of time.** A layoff reported 14 months ago is treated the same as one reported last week. Negotiation leverage decays; most tools don't model that decay. BriefCortex slices evidence by recency and weights it accordingly.
 2. **They cannot separate fact from opinion.** Analyst chatter, rumored executive departures, and confirmed filings get flattened into one undifferentiated blob. A deal lead cannot tell what is safe to say in the room and what is a rumor that will blow up in their face.
 
-The result: briefs that are long, confident, and unusable under pressure.
+Most tools therefore optimize for volume and fluency, not for whether a specific claim is safe to act on in a specific meeting. That is the gap BriefCortex targets.
 
 ---
 
@@ -100,8 +100,9 @@ Expected: 20 passed.
 
 ---
 
-## Design Principle
+## Design Constraints
 
-> **Semantics propose. Evidence disposes.**
->
-> The LLM is allowed to be aggressive, but only inside the boundary drawn by hard facts and a deterministic schema. Anything unverified is labeled `[UNVERIFIED]` and kept out of the negotiation ask.
+Two constraints are enforced in code, not just in prose:
+
+- **Hard facts are the only source of negotiation leverage.** Unverified commentary is rendered in a separate prompt block and cannot be promoted into the numeric asks of `executive_summary.recommendation`.
+- **Conflict detection is not part of the LLM path.** `detect_fact_conflicts()` returns structured conflicts to callers; it is never serialized into the model input. The two outputs are consumed independently.
