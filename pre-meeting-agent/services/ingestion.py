@@ -12,6 +12,7 @@ from pydantic import BaseModel, HttpUrl, ValidationError
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 from trafilatura import extract
 from tavily import TavilyClient
+import markdown as md
 
 
 # =============================================================================
@@ -63,6 +64,8 @@ class TavilySearchError(Exception):
 INCLUDE_DOMAINS = ["reuters.com", "bloomberg.com", "wsj.com", "cnbc.com"]
 
 MIN_CLEAN_TEXT_LENGTH = 100
+
+MIN_PARAGRAPH_LENGTH = 80
 
 
 # =============================================================================
@@ -159,14 +162,25 @@ def _tavily_search_with_retry(
 def _extract_clean_text(raw_content: Optional[str]) -> Optional[str]:
     """Extract clean text from raw_content using Trafilatura.
 
-    Returns None when extraction fails or the result is shorter than
-    MIN_CLEAN_TEXT_LENGTH characters.
+    Tavily include_raw_content=True returns markdown, not raw HTML.
+    Trafilatura expects HTML, so we convert markdown to HTML first,
+    then let Trafilatura strip navigation, headers and footers.
     """
     if not raw_content or not isinstance(raw_content, str):
         return None
 
+    content = raw_content.strip()
+    if not content:
+        return None
+
+    if "<" not in content or ">" not in content:
+        try:
+            content = md.markdown(content)
+        except Exception:
+            return None
+
     try:
-        clean_text = extract(raw_content, output_format="markdown")
+        clean_text = extract(content, output_format="markdown")
     except Exception:
         return None
 
@@ -202,13 +216,17 @@ def _split_facts_and_opinions(clean_text: str) -> Tuple[List[str], List[str]]:
     - The first 3 paragraphs plus the last paragraph go to hard facts.
     - The first sentence of each middle paragraph goes to analyst opinions.
 
+    Paragraphs shorter than MIN_PARAGRAPH_LENGTH are dropped before splitting,
+    because Tavily markdown contains headings, list items and quote blocks
+    that are structurally not paragraphs.
+
     This is a pure structural split. No semantic judgment, summarization,
     rewriting, or conflict detection is performed here.
     """
     paragraphs = [
         paragraph.strip()
-        for paragraph in re.split(r"\n+", clean_text)
-        if paragraph.strip()
+        for paragraph in re.split(r"\n\s*\n", clean_text)
+        if paragraph.strip() and len(paragraph.strip()) >= MIN_PARAGRAPH_LENGTH
     ]
 
     if not paragraphs:
