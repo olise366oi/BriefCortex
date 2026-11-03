@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from typing import List, Optional
 
+from dotenv import load_dotenv
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Make .env values visible to os.getenv() used by ingestion/analysis.
+load_dotenv()
 
 
 class Settings(BaseSettings):
@@ -18,6 +23,7 @@ class Settings(BaseSettings):
     # MOCK_DATA=TRUE
     MOCK_DATA: bool = True
     MOCK_PROCESSING_DELAY_SECONDS: float = 2.0
+    ENABLE_LOGS: bool = True
 
     TAVILY_API_KEY: Optional[str] = None
     BRIEFING_API_KEY: Optional[str] = None
@@ -32,6 +38,19 @@ class Settings(BaseSettings):
         case_sensitive=True,
         extra="ignore",
     )
+
+    def export_pipeline_env(self) -> None:
+        """Ensure pipeline modules that read os.getenv see configured keys."""
+        for key, value in {
+            "TAVILY_API_KEY": self.TAVILY_API_KEY,
+            "BRIEFING_API_KEY": self.BRIEFING_API_KEY,
+            "BRIEFING_BASE_URL": self.BRIEFING_BASE_URL,
+            "BRIEFING_MODEL": self.BRIEFING_MODEL,
+            "DEEPSEEK_API_KEY": self.DEEPSEEK_API_KEY,
+            "OPENAI_API_KEY": self.OPENAI_API_KEY,
+        }.items():
+            if value and not os.getenv(key):
+                os.environ[key] = value
 
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod

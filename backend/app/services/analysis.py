@@ -7,7 +7,11 @@ from typing import List, Tuple
 from openai import AsyncOpenAI
 from pydantic import BaseModel, HttpUrl, ValidationError
 
+from app.services.logger_service import get_logger
+
 from .ingestion import FactBase
+
+logger = get_logger("analysis")
 
 
 class Claim(BaseModel):
@@ -67,27 +71,33 @@ def _build_client() -> Tuple[AsyncOpenAI, str]:
     explicit_model = os.getenv("BRIEFING_MODEL")
 
     if explicit_key:
+        model = explicit_model or "gpt-4o-mini"
+        logger.info("LLM client selected | provider=briefing | model=%s", model)
         client = (
             AsyncOpenAI(api_key=explicit_key, base_url=explicit_base)
             if explicit_base
             else AsyncOpenAI(api_key=explicit_key)
         )
-        return client, explicit_model or "gpt-4o-mini"
+        return client, model
 
     if os.getenv("DEEPSEEK_API_KEY"):
+        model = explicit_model or "deepseek-chat"
+        logger.info("LLM client selected | provider=deepseek | model=%s", model)
         client = AsyncOpenAI(
             api_key=os.getenv("DEEPSEEK_API_KEY"),
             base_url=explicit_base or "https://api.deepseek.com",
         )
-        return client, explicit_model or "deepseek-chat"
+        return client, model
 
     if os.getenv("OPENAI_API_KEY"):
+        model = explicit_model or "gpt-4o-mini"
+        logger.info("LLM client selected | provider=openai | model=%s", model)
         client = (
             AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"), base_url=explicit_base)
             if explicit_base
             else AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         )
-        return client, explicit_model or "gpt-4o-mini"
+        return client, model
 
     raise BriefingGenerationError(
         "No LLM API key found. Set BRIEFING_API_KEY, DEEPSEEK_API_KEY, or OPENAI_API_KEY."
@@ -181,6 +191,12 @@ async def _call_llm_with_retry(
     for attempt in range(1, max_retries + 1):
         content = ""
         try:
+            logger.info(
+                "LLM call attempt %s/%s | model=%s",
+                attempt,
+                max_retries,
+                model,
+            )
             response = await client.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -191,10 +207,28 @@ async def _call_llm_with_retry(
             if not content:
                 raise ValueError("LLM returned empty content")
 
-            return BriefingReport.model_validate_json(content)
+            report = BriefingReport.model_validate_json(content)
+            logger.info(
+                "LLM call succeeded on attempt %s | confidence=%s | "
+                "news=%s hires=%s launches=%s open_questions=%s risks=%s",
+                attempt,
+                report.executive_summary.confidence,
+                len(report.news.items),
+                len(report.hires.items),
+                len(report.launches.items),
+                len(report.open_questions.items),
+                len(report.risks.items),
+            )
+            return report
 
         except ValidationError as exc:
             last_error = exc
+            logger.warning(
+                "LLM schema validation failed on attempt %s/%s | error=%s",
+                attempt,
+                max_retries,
+                exc,
+            )
             messages.append({"role": "assistant", "content": content})
             messages.append(
                 {
@@ -210,7 +244,18 @@ async def _call_llm_with_retry(
 
         except Exception as exc:
             last_error = exc
+            logger.warning(
+                "LLM call failed on attempt %s/%s | error=%s",
+                attempt,
+                max_retries,
+                exc,
+            )
 
+    logger.error(
+        "LLM failed after %s attempts | last_error=%s",
+        max_retries,
+        last_error,
+    )
     raise BriefingGenerationError(
         f"LLM failed to produce a valid BriefingReport after {max_retries} attempts: {last_error}"
     ) from last_error
@@ -225,6 +270,21 @@ async def generate_briefing_report(
 
     Raises BriefingGenerationError if the LLM fails after max_retries.
     """
+    logger.info(
+        "Analysis started | company_id=%s | purpose=%r | hard_facts=%s | "
+        "analyst_opinions=%s | conflicts=%s",
+        fact_base.company_id,
+        meeting_purpose,
+        len(fact_base.hard_facts),
+        len(fact_base.analyst_opinions),
+        len(fact_base.conflicts),
+    )
     client, model = _build_client()
     user_message = _build_user_message(fact_base, meeting_purpose)
-    return await _call_llm_with_retry(client, model, user_message, max_retries)
+    report = await _call_llm_with_retry(client, model, user_message, max_retries)
+    logger.info(
+        "Analysis complete | company_id=%s | recommendation_chars=%s",
+        fact_base.company_id,
+        len(report.executive_summary.recommendation),
+    )
+    return report

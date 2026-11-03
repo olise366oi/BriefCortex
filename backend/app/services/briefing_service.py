@@ -23,10 +23,30 @@ from app.repositories.briefing_repository import BriefingRepository
 
 MOCK_REPORT_PATH = Path(__file__).resolve().parents[1] / "mock" / "nio_briefing_report.json"
 
+from app.services.analysis import generate_briefing_report
+from app.services.ingestion import BriefingRequest as IngestionRequest
+from app.services.ingestion import ingest_company_data
 
 def _load_mock_report() -> BriefingReport:
     payload = json.loads(MOCK_REPORT_PATH.read_text(encoding="utf-8"))
     return BriefingReport.model_validate(payload)
+
+
+async def _generate_live_report(record: BriefingRecord) -> BriefingReport:
+    """Run ingestion + analysis and normalize into the API BriefingReport schema."""
+    
+
+    ingestion_request = IngestionRequest(
+        company_name=record.company_name,
+        meeting_time=record.meeting_time,
+        meeting_purpose=record.meeting_purpose,
+    )
+    fact_base = await ingest_company_data(ingestion_request)
+    analysis_report = await generate_briefing_report(
+        fact_base=fact_base,
+        meeting_purpose=record.meeting_purpose,
+    )
+    return BriefingReport.model_validate(analysis_report.model_dump(mode="json"))
 
 
 def _to_status_response(record: BriefingRecord) -> BriefingStatusResponse:
@@ -62,14 +82,17 @@ async def _process_job(briefing_id: uuid.UUID, settings: Settings) -> None:
     db = SessionLocal()
     try:
         repo = BriefingRepository(db)
-        repo.update(briefing_id, status=BriefingJobStatus.PROCESSING.value)
+        record = repo.update(briefing_id, status=BriefingJobStatus.PROCESSING.value)
+        if record is None:
+            return
 
-        await asyncio.sleep(settings.MOCK_PROCESSING_DELAY_SECONDS)
+        if settings.MOCK_DATA:
+            await asyncio.sleep(settings.MOCK_PROCESSING_DELAY_SECONDS)
+            report = _load_mock_report()
+        else:
+            settings.export_pipeline_env()
+            report = await _generate_live_report(record)
 
-        if not settings.MOCK_DATA:
-            raise RuntimeError("Live briefing pipeline is not wired yet")
-
-        report = _load_mock_report()
         repo.update(
             briefing_id,
             status=BriefingJobStatus.COMPLETED.value,

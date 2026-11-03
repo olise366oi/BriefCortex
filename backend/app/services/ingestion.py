@@ -14,6 +14,10 @@ from trafilatura import extract
 from tavily import TavilyClient
 import markdown as md
 
+from app.services.logger_service import get_logger
+
+logger = get_logger("ingestion")
+
 
 # =============================================================================
 # 1. Data contracts: input and output models
@@ -128,6 +132,13 @@ def _tavily_search_with_retry(
         if not api_key:
             raise RuntimeError("TAVILY_API_KEY environment variable is missing")
 
+        logger.info(
+            "Tavily search starting | query=%r | window=%s..%s | domains=%s",
+            query,
+            start_date,
+            end_date,
+            INCLUDE_DOMAINS,
+        )
         client = TavilyClient(api_key=api_key)
 
         response = client.search(
@@ -140,15 +151,24 @@ def _tavily_search_with_retry(
         )
 
         if not isinstance(response, dict):
+            logger.warning("Tavily search returned non-dict response")
             return []
 
         results = response.get("results", [])
         if not isinstance(results, list):
+            logger.warning("Tavily search results were not a list")
             return []
 
+        logger.info("Tavily search returned %s raw results", len(results))
         return results
 
     except Exception as exc:
+        logger.exception(
+            "Tavily search failed | query=%r | window=%s..%s",
+            query,
+            start_date,
+            end_date,
+        )
         raise TavilySearchError(
             f"Tavily search failed "
             f"(query={query!r}, start_date={start_date}, end_date={end_date}): {exc}"
@@ -334,8 +354,16 @@ async def ingest_company_data(request: BriefingRequest) -> FactBase:
     5. Store results separately in hard_facts and analyst_opinions.
     6. Validate and return the result with FactBase.model_validate().
     """
+    logger.info(
+        "Ingestion started | company=%r | purpose=%r | meeting_time=%s",
+        request.company_name,
+        request.meeting_purpose,
+        request.meeting_time.isoformat(),
+    )
+
     last_refresh_date: Optional[datetime] = None
     start_date, end_date = _calculate_date_window(last_refresh_date)
+    logger.info("Ingestion date window | start=%s | end=%s", start_date, end_date)
 
     query = f"{request.company_name} news OR hires OR launches OR legal risk"
 
@@ -348,9 +376,12 @@ async def ingest_company_data(request: BriefingRequest) -> FactBase:
 
     hard_facts: List[FactItem] = []
     analyst_opinions: List[FactItem] = []
+    extracted_sources = 0
+    skipped_sources = 0
 
     for result in results:
         if not isinstance(result, dict):
+            skipped_sources += 1
             continue
 
         raw_content = result.get("raw_content")
@@ -359,9 +390,18 @@ async def ingest_company_data(request: BriefingRequest) -> FactBase:
 
         clean_text = _extract_clean_text(raw_content)
         if not clean_text:
+            skipped_sources += 1
+            logger.info("Skipped source (no clean text) | url=%s", source_url)
             continue
 
+        extracted_sources += 1
         hard_texts, opinion_texts = _split_facts_and_opinions(clean_text)
+        logger.info(
+            "Extracted source | url=%s | hard_paragraphs=%s | opinion_sentences=%s",
+            source_url,
+            len(hard_texts),
+            len(opinion_texts),
+        )
 
         for text in hard_texts:
             fact_item = _build_fact_item(text, source_url, publish_date)
@@ -387,4 +427,14 @@ async def ingest_company_data(request: BriefingRequest) -> FactBase:
 
     fact_base.conflicts = detect_fact_conflicts(fact_base)
 
+    logger.info(
+        "Ingestion complete | company_id=%s | sources_used=%s | sources_skipped=%s | "
+        "hard_facts=%s | analyst_opinions=%s | conflicts=%s",
+        fact_base.company_id,
+        extracted_sources,
+        skipped_sources,
+        len(fact_base.hard_facts),
+        len(fact_base.analyst_opinions),
+        len(fact_base.conflicts),
+    )
     return fact_base
