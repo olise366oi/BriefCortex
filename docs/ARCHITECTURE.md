@@ -2,31 +2,101 @@
 
 ## High-level flow
 
-```mermaid
-sequenceDiagram
-  participant UI as Next.js /briefing
-  participant API as FastAPI /api/briefings
-  participant Svc as briefing_service
-  participant Repo as BriefingRepository
-  participant PG as PostgreSQL
+End-to-end data flow from the UI through the gateway, the retrieval and cleaning layer, to structured LLM output. This is the canonical diagram; `README.md` renders the same one.
 
-  UI->>API: POST BriefingRequest
-  API->>Svc: create_briefing()
-  Svc->>Repo: create pending row
-  Repo->>PG: INSERT briefings
-  Svc-->>API: id
-  API-->>UI: 202 Accepted
-  Svc->>Repo: update status/report async
-  Repo->>PG: UPDATE briefings
-  loop Poll / select
-    UI->>API: GET /briefings or /briefings/{id}
-    API->>Svc: list/get
-    Svc->>Repo: query by id / list
-    Repo->>PG: SELECT
-    API-->>UI: status + optional JSONB report
-  end
-  UI->>UI: side panel + clay report UI
+```mermaid
+graph TD
+    %% ---------- Frontend & Gateway ----------
+    UI[Frontend UI] -->|Input: Company + Time + Purpose| GW[Bifrost Gateway]
+
+    %% ---------- Bifrost extension ----------
+    subgraph EXT["Bifrost Extension Layer"]
+        GW -.->|Intercept Request| Midware["Python Middleware<br/>Content-Aware TTL Classifier"]
+        Midware -->|Inject x-bf-cache-ttl & key| GW
+    end
+
+    %% ---------- Cache & control ----------
+    subgraph CACHE["Cache & Control Layer"]
+        GW --> CheckBrief{"1. Check Briefing Cache"}
+        CheckBrief -- Hit --> ReturnCache[Return Cached Briefing]
+        ReturnCache --> UI
+        CheckBrief -- Miss --> CheckFact{"2. Check Fact Base"}
+        CheckFact -- Valid --> CalcDelta[Calculate Incremental Window]
+        CheckFact -- Expired --> FullSearch[Full Search: 30 Days]
+    end
+
+    %% ---------- Retrieval & cleaning ----------
+    subgraph RETRIEVE["Data Retrieval & Cleaning Layer"]
+        CalcDelta --> Tavily[Tavily Search API]
+        FullSearch --> Tavily
+
+        Tavily -- Network Error --> Tenacity["Tenacity: Retry"]
+        Tenacity --> Tavily
+        Tenacity -- Final Failure --> Fallback[Fallback: Friendly Prompt]
+
+        Tavily -- Success --> Trafilatura["Trafilatura<br/>Extract Clean Text"]
+        Trafilatura --> SmartExtract["Smart Extraction<br/>Facts vs Opinions"]
+
+        SmartExtract --> FactDB[(SQLite Fact Base)]
+    end
+
+    %% ---------- LLM inference ----------
+    subgraph INFER["LLM Inference Layer"]
+        FactDB --> LLM["OpenAI SDK<br/>Cloud / Local Model"]
+        Fallback --> LLM
+
+        LLM -->|Generate Result| Pydantic["Pydantic<br/>JSON Validation"]
+        Pydantic -- Failure --> RetryLLM[Auto Retry / Repair]
+        RetryLLM --> LLM
+        Pydantic -- Success --> SaveBrief[(SQLite Briefing Cache)]
+    end
+
+    SaveBrief --> UI
+
+    %% ---------- Styling ----------
+    classDef edgeNode fill:#1f2937,stroke:#111827,stroke-width:2px,color:#ffffff
+    classDef layerNode fill:#f3f4f6,stroke:#9ca3af,stroke-width:1px,color:#111827
+    classDef storeNode fill:#ecfdf5,stroke:#10b981,stroke-width:2px,color:#065f46
+    classDef failNode fill:#fef2f2,stroke:#ef4444,stroke-width:1px,color:#991b1b
+
+    class GW,UI edgeNode
+    class Midware,CheckBrief,CheckFact,CalcDelta,FullSearch,ReturnCache layerNode
+    class Tavily,Tenacity,Trafilatura,SmartExtract,LLM,Pydantic,RetryLLM layerNode
+    class FactDB,SaveBrief storeNode
+    class Fallback failNode
 ```
+
+### Three checkpoints and two stores
+
+The diagram carries three decision points and two persistence layers:
+
+| Checkpoint | Question | Keyed on |
+|---|---|---|
+| 1. Briefing cache | Has this exact brief already been produced? | company + time + purpose |
+| 2. Fact base | Is the stored evidence still usable? | company + 30-day window |
+| 3. Conflict validation | Do the retrieved facts contradict each other? | hard facts only |
+
+| Store | Contents |
+|---|---|
+| `FactBase` | hard facts and opinions, reusable across purposes of the same company |
+| `Briefing cache` | the finished report, so a repeat request returns without an LLM call |
+
+Both are SQLite-backed in the diagram. A briefing hit returns straight to the UI. A fact-base hit only widens the retrieval window and re-runs inference, skipping retrieval entirely.
+
+### Bifrost middleware at the edge
+
+The request is intercepted before it reaches the cache layer. The Python middleware classifies the payload, then injects `x-bf-cache-ttl` and a `x-bf-cache-key` back into the gateway request — that pair is what makes the TTL content-aware rather than static. See `bifrost-time-aware-plugin/`.
+
+## Implementation status
+
+| Layer | State |
+|---|---|
+| Retrieval (Tavily, Tenacity, Trafilatura, structural extraction) | implemented in `app/services/ingestion.py` |
+| Search planning and per-publisher scoping | implemented in `app/services/search_planner.py` and `ingestion.py` |
+| Conflict validation | implemented in `app/services/conflict_detection.py` |
+| Fact base and briefing persistence | implemented on Postgres (`app/repositories/`) |
+| Bifrost middleware (TTL classifier) | implemented in `bifrost-time-aware-plugin/`; the gateway itself is not wired into the request path yet, so the headers reach the provider directly |
+| Gateway cache checkpoints 1 and 2 | planned; config lives in `bifrost/config.json` |
 
 ## Modules
 
@@ -51,6 +121,7 @@ sequenceDiagram
 | `app/db/models.py` | SQLAlchemy ORM (`briefings` table, `report` JSONB) |
 | `app/services/ingestion.py` | Tavily retrieval + FactBase assembly |
 | `app/services/search_planner.py` | Model-driven search plan, constrained to a source registry |
+| `bifrost-time-aware-plugin/` | Content-aware TTL classifier and cache-header middleware |
 | `app/services/analysis.py` | LLM BriefingReport generation |
 | `app/services/conflict_detection.py` | Deterministic fact conflict engine |
 | `app/models/` | HTTP Pydantic schemas |

@@ -35,7 +35,71 @@ Given `{company, meeting_purpose}`, BriefCortex produces a structured `BriefingR
 
 <!-- ARCH_DIAGRAM -->
 
-*(Architecture diagram: see pitch deck. Also see `docs/ARCHITECTURE.md`.)*
+End-to-end data flow, from the UI through the Bifrost gateway, the retrieval and cleaning layer, to structured LLM output.
+
+```mermaid
+graph TD
+    %% ---------- Frontend & Gateway ----------
+    UI[Frontend UI] -->|Input: Company + Time + Purpose| GW[Bifrost Gateway]
+
+    %% ---------- Bifrost extension ----------
+    subgraph EXT["Bifrost Extension Layer"]
+        GW -.->|Intercept Request| Midware["Python Middleware<br/>Content-Aware TTL Classifier"]
+        Midware -->|Inject x-bf-cache-ttl & key| GW
+    end
+
+    %% ---------- Cache & control ----------
+    subgraph CACHE["Cache & Control Layer"]
+        GW --> CheckBrief{"1. Check Briefing Cache"}
+        CheckBrief -- Hit --> ReturnCache[Return Cached Briefing]
+        ReturnCache --> UI
+        CheckBrief -- Miss --> CheckFact{"2. Check Fact Base"}
+        CheckFact -- Valid --> CalcDelta[Calculate Incremental Window]
+        CheckFact -- Expired --> FullSearch[Full Search: 30 Days]
+    end
+
+    %% ---------- Retrieval & cleaning ----------
+    subgraph RETRIEVE["Data Retrieval & Cleaning Layer"]
+        CalcDelta --> Tavily[Tavily Search API]
+        FullSearch --> Tavily
+
+        Tavily -- Network Error --> Tenacity["Tenacity: Retry"]
+        Tenacity --> Tavily
+        Tenacity -- Final Failure --> Fallback[Fallback: Friendly Prompt]
+
+        Tavily -- Success --> Trafilatura["Trafilatura<br/>Extract Clean Text"]
+        Trafilatura --> SmartExtract["Smart Extraction<br/>Facts vs Opinions"]
+
+        SmartExtract --> FactDB[(SQLite Fact Base)]
+    end
+
+    %% ---------- LLM inference ----------
+    subgraph INFER["LLM Inference Layer"]
+        FactDB --> LLM["OpenAI SDK<br/>Cloud / Local Model"]
+        Fallback --> LLM
+
+        LLM -->|Generate Result| Pydantic["Pydantic<br/>JSON Validation"]
+        Pydantic -- Failure --> RetryLLM[Auto Retry / Repair]
+        RetryLLM --> LLM
+        Pydantic -- Success --> SaveBrief[(SQLite Briefing Cache)]
+    end
+
+    SaveBrief --> UI
+
+    %% ---------- Styling ----------
+    classDef edgeNode fill:#1f2937,stroke:#111827,stroke-width:2px,color:#ffffff
+    classDef layerNode fill:#f3f4f6,stroke:#9ca3af,stroke-width:1px,color:#111827
+    classDef storeNode fill:#ecfdf5,stroke:#10b981,stroke-width:2px,color:#065f46
+    classDef failNode fill:#fef2f2,stroke:#ef4444,stroke-width:1px,color:#991b1b
+
+    class GW,UI edgeNode
+    class Midware,CheckBrief,CheckFact,CalcDelta,FullSearch,ReturnCache layerNode
+    class Tavily,Tenacity,Trafilatura,SmartExtract,LLM,Pydantic,RetryLLM layerNode
+    class FactDB,SaveBrief storeNode
+    class Fallback failNode
+```
+
+*(The same diagram lives in `docs/ARCHITECTURE.md` alongside the module responsibilities and design decisions.)*
 
 ### 1. Bifrost Time-Slicing
 
