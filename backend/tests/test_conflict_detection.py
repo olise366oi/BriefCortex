@@ -22,8 +22,8 @@ def _fact_base(hard_facts, analyst_opinions=None) -> FactBase:
 def test_layoff_vs_hiring_conflict():
     fact_base = _fact_base(
         [
-            FactItem(content="蔚来宣布裁员以压缩成本。", source_url=SOURCE_A),
-            FactItem(content="该公司开启大规模招聘扩充团队。", source_url=SOURCE_B),
+            FactItem(content="NIO announced layoffs to cut costs.", source_url=SOURCE_A),
+            FactItem(content="The company is hiring at scale to expand its team.", source_url=SOURCE_B),
         ]
     )
 
@@ -33,15 +33,15 @@ def test_layoff_vs_hiring_conflict():
     assert conflicts[0]["conflict_type"] == "headcount_up_down"
     assert conflicts[0]["source_a"] == SOURCE_A
     assert conflicts[0]["source_b"] == SOURCE_B
-    assert conflicts[0]["fact_a"] == "蔚来宣布裁员以压缩成本。"
-    assert conflicts[0]["fact_b"] == "该公司开启大规模招聘扩充团队。"
+    assert conflicts[0]["fact_a"] == "NIO announced layoffs to cut costs."
+    assert conflicts[0]["fact_b"] == "The company is hiring at scale to expand its team."
 
 
 def test_no_conflict_within_same_fact():
     fact_base = _fact_base(
         [
             FactItem(
-                content="公司先裁员后重新招聘，团队规模基本持平。",
+                content="The company announced layoffs and then resumed hiring, leaving headcount roughly flat.",
                 source_url=SOURCE_A,
             )
         ]
@@ -68,8 +68,8 @@ def test_opinions_ignored():
     fact_base = _fact_base(
         [FactItem(content="NIO reported an 8% revenue decline.", source_url=SOURCE_A)],
         [
-            FactItem(content="分析师认为公司正在裁员。", source_url=SOURCE_B),
-            FactItem(content="另有分析师称公司正在大规模招聘。", source_url=SOURCE_C),
+            FactItem(content="Analysts believe the company is cutting jobs.", source_url=SOURCE_B),
+            FactItem(content="Other analysts say the company is hiring at scale.", source_url=SOURCE_C),
         ],
     )
 

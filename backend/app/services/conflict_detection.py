@@ -10,7 +10,6 @@ CONFLICT_RULES: list[tuple[str, list[str], list[str]]] = [
     (
         "headcount_up_down",
         [
-            "裁员",
             "layoff",
             "layoffs",
             "reduction in force",
@@ -21,7 +20,6 @@ CONFLICT_RULES: list[tuple[str, list[str], list[str]]] = [
             "roles cut",
         ],
         [
-            "招聘",
             "hiring",
             "recruiting",
             "hiring spree",
@@ -31,33 +29,30 @@ CONFLICT_RULES: list[tuple[str, list[str], list[str]]] = [
     ),
     (
         "cost_up_down",
-        ["涨价", "price hike", "price increase", "raising prices"],
-        ["降价", "price cut", "price reduction", "discount"],
+        ["price hike", "price increase", "raising prices"],
+        ["price cut", "price reduction", "discount"],
     ),
     (
         "expand_contract",
-        ["扩张", "expansion", "new plant", "new factory"],
-        ["收缩", "shutdown", "closing plant", "facility closure"],
+        ["expansion", "new plant", "new factory"],
+        ["shutdown", "closing plant", "facility closure"],
     ),
     (
         "profit_loss",
-        ["盈利", "profitable", "profit growth"],
-        ["亏损", "loss", "net loss", "wider loss"],
+        ["profitable", "profit growth"],
+        ["loss", "net loss", "wider loss"],
     ),
 ]
 
 
 # Keyword matching path. Compiled with lru_cache (approach Y): the rule table stays
-# a plain str list so it stays readable and testable, and the ASCII/non-ASCII split
-# happens once at compile time. Pure-ASCII keywords get \b boundaries so "rif"
-# cannot match inside "tariff"; CJK keywords have no word boundaries, so they are
-# matched as plain substrings.
+# a plain str list so it stays readable and testable, and the pattern is built once
+# at compile time. Keywords are pure ASCII, so each gets \b boundaries and "rif"
+# cannot match inside "tariff".
 @lru_cache(maxsize=None)
 def _compile_keyword(keyword: str) -> re.Pattern[str]:
     lowered = keyword.lower()
-    if lowered.isascii():
-        return re.compile(r"\b" + re.escape(lowered) + r"\b", re.IGNORECASE)
-    return re.compile(re.escape(lowered), re.IGNORECASE)
+    return re.compile(r"\b" + re.escape(lowered) + r"\b", re.IGNORECASE)
 
 
 def _kw_match(text: str, keyword: str) -> bool:

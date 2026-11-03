@@ -100,9 +100,6 @@ NEGATIVE_SIGNAL_KEYWORDS = (
     "cut jobs",
     "reduction in force",
     "restructur",
-    "裁员",
-    "裁减",
-    "岗位削减",
     "cash flow",
     "cash-flow",
     "cash crunch",
@@ -111,7 +108,6 @@ NEGATIVE_SIGNAL_KEYWORDS = (
     "losses",
     "net loss",
     "wider loss",
-    "亏损",
     "decline",
     "declined",
     "declines",
@@ -120,9 +116,6 @@ NEGATIVE_SIGNAL_KEYWORDS = (
     "slumped",
     "plunge",
     "plunged",
-    "下滑",
-    "下降",
-    "暴跌",
     "fell",
     "falls",
     "drop",
@@ -147,8 +140,6 @@ NEGATIVE_SIGNAL_KEYWORDS = (
     "departed",
     "step down",
     "stepped down",
-    "离职",
-    "辞职",
     "downsize",
     "downturn",
     "warn",
@@ -181,14 +172,6 @@ NEGATIVE_SIGNAL_KEYWORDS = (
     "pressure",
     "burden",
     "overcapacit",
-    "召回",
-    "停产",
-    "停运",
-    "调查",
-    "诉讼",
-    "处罚",
-    "罚款",
-    "诉讼",
 )
 
 # Cap the number of recovered negative sentences per source so one long
@@ -1057,7 +1040,7 @@ def _first_sentence(paragraph: str) -> str:
     if not paragraph:
         return ""
 
-    parts = re.split(r"(?<=[\u3002\uFF01\uFF1F.!?])\s*", paragraph, maxsplit=1)
+    parts = re.split(r"(?<=[.!?])\s+", paragraph, maxsplit=1)
     first = parts[0].strip() if parts else paragraph
 
     return first or paragraph
