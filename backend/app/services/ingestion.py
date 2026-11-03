@@ -1,4 +1,4 @@
-# /pre-meeting-agent/services/ingestion.py
+# /backend/app/services/ingestion.py
 from __future__ import annotations
 
 import asyncio

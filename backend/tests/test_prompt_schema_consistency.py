@@ -1,10 +1,10 @@
 import re
 from pathlib import Path
 
-from services.analysis import BriefingReport, SYSTEM_PROMPT
+from app.services.analysis import BriefingReport, SYSTEM_PROMPT
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ANALYSIS_SOURCE = PROJECT_ROOT / "services" / "analysis.py"
+ANALYSIS_SOURCE = PROJECT_ROOT / "app" / "services" / "analysis.py"
 
 SECTIONS = ["news", "hires", "launches", "open_questions", "risks"]
 SUMMARY_SECTION = "executive_summary"

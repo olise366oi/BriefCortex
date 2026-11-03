@@ -32,7 +32,7 @@ Given `{company, meeting_purpose}`, BriefCortex produces a structured `BriefingR
 
 <!-- ARCH_DIAGRAM -->
 
-*(Architecture diagram: see pitch deck.)*
+*(Architecture diagram: see pitch deck. Also see `ARCHITECTURE.md`.)*
 
 ### 1. Bifrost Time-Slicing
 
@@ -74,23 +74,61 @@ The repo ships with `pytest` coverage for both the prompt/schema contract and th
 ## Repository Layout
 
 ```
-pre-meeting-agent/
-├── services/
-│   ├── ingestion.py           # Tavily retrieval, cleaning, FactBase assembly, conflict wiring
-│   ├── analysis.py            # SYSTEM_PROMPT, LLM call, BriefingReport schema
-│   └── conflict_detection.py  # Deterministic regex rule engine
-├── tests/
-│   ├── test_prompt_schema_consistency.py
-│   └── test_conflict_detection.py
-└── mock/
-    └── nio_briefing_report.json   # Schema-valid demo payload
+BriefCortex/
+├── frontend/                 # Next.js App Router UI
+│   ├── app/                  # Routes (`/` redirects to `/briefing`)
+│   └── src/                  # Components, hooks, API clients, types
+├── backend/                  # FastAPI service
+│   ├── app/
+│   │   ├── api/              # Route handlers
+│   │   ├── core/             # Settings
+│   │   ├── models/           # Pydantic request/response schemas
+│   │   ├── services/         # Ingestion, analysis, conflict detection, briefing orchestration
+│   │   └── mock/             # Demo briefing payload
+│   └── tests/
+├── ARCHITECTURE.md
+├── CLAUDE.md
+└── KARPATHY.md
 ```
+
+---
+
+## Local Setup
+
+### Backend
+
+```bash
+cd backend
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+uvicorn app.main:app --reload --port 8000
+```
+
+### Frontend
+
+```bash
+cd frontend
+cp .env.example .env.local
+npm install
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) — the app redirects to `/briefing`.
+
+### API contract
+
+- `POST /api/briefings` — accepts `{ company_name, meeting_time, meeting_purpose }`, returns `202` with `{ request_id }`
+- `GET /api/briefings/{request_id}` — poll until `status` is `completed` or `failed`
 
 ---
 
 ## Running Tests
 
 ```bash
+cd backend
 python -m pytest tests/ -v
 ```
 
@@ -106,3 +144,12 @@ Two constraints are enforced in code, not just in prose:
 
 - **Hard facts are the only source of negotiation leverage.** Unverified commentary is rendered in a separate prompt block and cannot be promoted into the numeric asks of `executive_summary.recommendation`.
 - **Conflict detection is not part of the LLM path.** `detect_fact_conflicts()` returns structured conflicts to callers; it is never serialized into the model input. The two outputs are consumed independently.
+
+---
+
+## Contributing
+
+1. Branch from `main` with a `feature/`, `fix/`, or `chore/` prefix.
+2. Follow conventions in `CLAUDE.md` and the coding behavior contract in `KARPATHY.md`.
+3. Keep route handlers thin; put business logic in services.
+4. Open a PR with a clear summary and test notes.

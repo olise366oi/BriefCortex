@@ -1,7 +1,7 @@
 import pytest
 
-from services.conflict_detection import CONFLICT_RULES, detect_fact_conflicts
-from services.ingestion import FactBase, FactItem
+from app.services.conflict_detection import CONFLICT_RULES, detect_fact_conflicts
+from app.services.ingestion import FactBase, FactItem
 
 SOURCE_A = "https://www.reuters.com/business/nio-cash-flow"
 SOURCE_B = "https://www.bloomberg.com/news/nio-headcount"

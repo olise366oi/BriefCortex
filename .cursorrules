@@ -1,0 +1,33 @@
+# Cursor Rules for BriefCortex
+
+## Architecture
+- Frontend: Next.js App Router in /frontend (routes in app/, logic in src/)
+- Backend: FastAPI in /backend/app
+- Never mix frontend and backend logic
+- Before writing code, read KARPATHY.md
+
+## Frontend Rules
+- Components live in src/components/briefing/ or src/components/ui/
+- All API calls go in src/api/ — never fetch/axios directly in components
+- Custom hooks in src/hooks/, pure utils in src/lib/
+- TypeScript strict mode — no any without a comment
+- Tailwind + clay CSS classes from src/styles/globals.css
+- / redirects to /briefing (authless)
+
+## Backend Rules
+- Route handlers delegate to services — keep routes thin
+- Business logic in app/services/
+- HTTP I/O schemas in app/models/
+- Settings via pydantic-settings in app/core/config.py
+- Conflict detection output must never enter the LLM prompt
+
+## API Contract
+- POST /api/briefings → 202 { request_id }
+- GET /api/briefings/{request_id} → status + optional report
+
+## Testing
+- Backend: pytest from backend/, mirrors app/ services
+- Frontend: keep presentational components free of side effects
+
+## Git
+- Branch naming: feature/, fix/, chore/, docs/
