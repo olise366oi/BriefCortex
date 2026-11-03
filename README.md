@@ -21,8 +21,11 @@ Most tools therefore optimize for volume and fluency, not for whether a specific
 
 Given `{company, meeting_purpose}`, BriefCortex produces a structured `BriefingReport`:
 
-- **Hard facts vs. analyst opinions**, kept in separate lanes end to end.
-- **Executive summary with numeric negotiation asks**, derived only from hard facts.
+- **Plan-then-search retrieval**: the model decides which queries to run and which publisher categories to hit, constrained to a source registry.
+- **Per-publisher scoping**: 13 domains each get their own path and body-boundary rules, so navigation trees, related-article blocks and paywalls never become facts.
+- **30-day freshness**: both the publication date and the reporting period inside each sentence are checked.
+- **Hard facts only**: commentator framing never reaches the LLM.
+- **Executive summary with numeric negotiation asks**, derived only from hard facts — or a directional business read when no objective was supplied.
 - **A deterministic conflict-detection lane** that flags contradictory facts with both sources attached — and is *never* fed into the LLM.
 - **Dual-layer caching** so the second identical request returns in milliseconds.
 
@@ -38,7 +41,37 @@ Given `{company, meeting_purpose}`, BriefCortex produces a structured `BriefingR
 
 Evidence is not a flat list. Bifrost partitions retrieved material into time slices (e.g. last 7 days / last 90 days / older), so the prompt can distinguish "fresh leverage" from "stale context". A 2023 layoff does not get used as a 2026 negotiation lever.
 
-### 2. Fact / Opinion Separation
+### 2. Retrieval: Plan, Scope, Then Read
+
+Retrieval is not a single query against a flat domain list.
+
+**Planning.** `search_planner.py` asks the model for a search plan — which queries to run and which publisher categories to use. The model may only choose *categories* from a fixed source registry (`financial_wire`, `financial_business`, `asia_market`, `auto_industry`, `official_primary`); any category outside it is discarded, and domains are resolved from the registry, so a fabricated host can never reach the search API. When the model is unavailable the planner falls back to a deliberately industry-agnostic financial plan, so a bank and an automaker both get valid coverage.
+
+**Scoping.** Two rule tables are keyed by publisher and verified against live pages:
+
+- `SITE_SECTION_RULES` — keep/drop path prefixes, so opinion columns, live blogs, stock-quote tables and video pages are never read. Longest-domain matching keeps `markets.businessinsider.com` on its own rules.
+- `SITE_BODY_RULES` — per-publisher body open and close markers plus chrome-line filters. Bloomberg opens with a ~190-line corporate mega-menu, CNBC arrives as a single newline-free blob, FT returns a paywall, gasgoo trails a "Related Articles" block that names other companies. Each needs its own boundary; one shared rule set cannot cover them.
+
+**Reading.** Hard facts are the opening three paragraphs plus the closing paragraph. Middle paragraphs contribute only their first sentence, and only when it carries a negative signal — so the fact base gets the leverage without absorbing the commentator's framing.
+
+**Depth.** A coverage loop keeps searching while a round still contributes previously unseen URLs that carry an article body (`MAX_SEARCH_ROUNDS=20`). Tavily returns 10 results by default and accepts 20; above 20 the response is unreliable (measured: 25 → 16, 30 → 1), so extra coverage comes from more queries rather than a larger page size. When a publisher returns results without bodies, that publisher is dropped and the same queries re-run, so a syndicated telling can take the slot an empty page was holding.
+
+### 3. Freshness: Publication Date and Reporting Period
+
+Two different clocks matter, and only checking one is not enough.
+
+- **Publication date.** Tavily timestamps are RFC 2822 (`Wed, 21 Oct 2026 00:00:00 GMT`), which `datetime.fromisoformat` rejects outright, so the date is parsed with `email.utils.parsedate_to_datetime`. When a result still arrives without a date, a two-tier fallback runs: the date is read out of the URL slug first (offline, and it survives the anti-bot walls that answer Reuters with 401 and Bloomberg with 403), then from a page fetch via `htmldate`.
+- **Reporting period.** An article published inside the window can still report an older period ("in the first five months of 2026", "third quarter of 2025"). Those sentences are dropped. Comparisons are kept, because "lowest since April 2025" describes where things stand *now*.
+
+Duplicate sentences are kept once, and the longer telling wins — a bare figure from one outlet does not shadow the same figure with its breakdown from another.
+
+### 4. Two Report Modes
+
+The report follows the meeting objective when one is supplied: numeric asks, leverage, trades.
+
+With no objective, the brief is a *fundamentals* brief — the company's business direction, what is demonstrably working, and what deserves caution. In that mode the model is forbidden from inventing a target or emitting numeric demands, and the anti-hallucination fallback sentence is scoped to negotiation mode only.
+
+### 5. Fact / Opinion Separation
 
 `FactBase` carries two distinct lists: `hard_facts` and `analyst_opinions`. They are rendered into the LLM prompt as separate, labeled blocks (`<HARD_FACTS>`, `<ANALYST_OPINIONS>`). The system prompt forbids using unverified commentary as negotiation leverage. If hard facts contain no negative signal, the model is required to output the exact fallback sentence:
 
@@ -46,20 +79,20 @@ Evidence is not a flat list. Bifrost partitions retrieved material into time sli
 
 No fabrication, no manufactured aggression.
 
-### 3. Conflict Detection as an Independent, Auditable Lane
+### 6. Conflict Detection as an Independent, Auditable Lane
 
 `detect_fact_conflicts()` runs a deterministic regex rule engine over `hard_facts` only. It returns structured conflicts with both sides' `source_url`, and its output is **never fed into the LLM prompt**.
 
 LLM output and conflict detection are two independent tracks by design: semantics cannot override evidence, and evidence cannot be reinterpreted by semantics.
 
-### 4. Dual-Layer Cache
+### 7. Dual-Layer Cache
 
 - **Layer 1 — exact-request cache:** identical `{company, meeting_purpose}` returns the stored report instantly.
 - **Layer 2 — evidence cache:** Tavily retrieval results are cached per company with a TTL, so a re-run with a different `meeting_purpose` skips retrieval entirely.
 
 Demo implication: the second run is a millisecond response, not a 30-second LLM call.
 
-### 5. Tested, Not Vibes
+### 8. Tested, Not Vibes
 
 The repo ships with `pytest` coverage for both the prompt/schema contract and the conflict engine, including:
 
@@ -85,7 +118,7 @@ BriefCortex/
 │   │   ├── db/               # SQLAlchemy ORM models
 │   │   ├── repositories/     # Data access (Postgres)
 │   │   ├── models/           # Pydantic request/response schemas
-│   │   ├── services/         # Ingestion, analysis, conflict detection, briefing orchestration
+│   │   ├── services/         # Ingestion, search planning, analysis, conflict detection, briefing orchestration
 │   │   └── mock/             # Demo briefing payload
 │   └── tests/
 └── docs/                     # ARCHITECTURE, CLAUDE, KARPATHY

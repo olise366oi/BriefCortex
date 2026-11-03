@@ -50,6 +50,7 @@ sequenceDiagram
 | `app/repositories/` | Postgres data access only |
 | `app/db/models.py` | SQLAlchemy ORM (`briefings` table, `report` JSONB) |
 | `app/services/ingestion.py` | Tavily retrieval + FactBase assembly |
+| `app/services/search_planner.py` | Model-driven search plan, constrained to a source registry |
 | `app/services/analysis.py` | LLM BriefingReport generation |
 | `app/services/conflict_detection.py` | Deterministic fact conflict engine |
 | `app/models/` | HTTP Pydantic schemas |
