@@ -2,6 +2,8 @@
 """Publisher registry and per-publisher extraction rules."""
 from __future__ import annotations
 
+from datetime import date
+
 # Tavily rejects path patterns in include_domains for topic='news', and `site:`
 # operators are ignored, so section scoping has to happen client-side. These
 # paths are quote/profile shells that always come back with empty raw_content.
@@ -22,88 +24,81 @@ MIN_PARAGRAPH_LENGTH = 80
 # Only the opening and closing paragraphs are treated as hard facts.
 HARD_FACT_HEAD_PARAGRAPHS = 3
 
+# Publisher indexes file articles under the publication year, so the keep
+# prefixes must follow the calendar instead of a hard-coded year.
+def recent_year_sections(years_back: int = 2) -> tuple[str, ...]:
+    """Return the URL year segments that can still carry in-window articles."""
+    current = date.today().year
+    return tuple(f"/{year}/" for year in range(current, current - years_back - 1, -1))
+
 # Middle paragraphs are only inspected for these leverage signals, so that
 # commentator framing never reaches the fact base.
+#
+# Entries are canonical word forms: the matcher anchors on word boundaries and
+# accepts an optional plural suffix, so "miss" no longer matches "mission" and
+# "loss" still matches "losses". A trailing "*" marks a deliberate stem.
 NEGATIVE_SIGNAL_KEYWORDS = (
     "layoff",
-    "layoffs",
     "job cut",
-    "job cuts",
     "cut jobs",
+    "cut roles",
+    "roles cut",
     "reduction in force",
-    "restructur",
+    "restructur*",
     "cash flow",
     "cash-flow",
     "cash crunch",
     "liquidity",
     "loss",
-    "losses",
     "net loss",
     "wider loss",
     "decline",
-    "declined",
-    "declines",
-    "declining",
     "slump",
-    "slumped",
     "plunge",
-    "plunged",
     "fell",
-    "falls",
+    "fall",
     "drop",
-    "dropped",
     "miss",
-    "missed",
-    "misses",
     "shortfall",
     "below expectations",
     "cost cut",
-    "cost cuts",
     "cost-cutting",
     "margin pressure",
     "margin squeeze",
     "price cut",
     "price reduction",
     "discount",
-    "resign",
-    "resigned",
-    "resignation",
+    "resign*",
     "departure",
     "departed",
     "step down",
     "stepped down",
-    "downsize",
+    "downsize*",
     "downturn",
-    "warn",
-    "warned",
-    "warning",
+    "warn*",
     "probe",
     "lawsuit",
     "litigation",
     "investigation",
     "sanction",
     "recall",
-    "delay",
-    "delayed",
-    "halts",
-    "halted",
-    "suspend",
-    "suspended",
+    "delay*",
+    "halt*",
+    "suspend*",
     "shutdown",
     "closure",
     "default",
-    "insolven",
-    "bankrupt",
+    "insolven*",
+    "bankrupt*",
     "distress",
     "downgrade",
-    "downgraded",
     "weak",
     "weaker",
     "slowdown",
-    "underperform",
+    "underperform*",
     "pressure",
     "burden",
-    "overcapacit",
+    "overcapacit*",
 )
 
 # Cap the number of recovered negative sentences per source so one long
@@ -242,7 +237,7 @@ SITE_SECTION_RULES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("/livecoverage/", "/podcasts/", "/video/", "/opinion/"),
     ),
     "cnbc.com": (
-        ("/markets/", "/business/", "/technology/", "/2026/", "/2025/"),
+        ("/markets/", "/business/", "/technology/") + recent_year_sections(),
         ("/quotes/", "/video/", "/investingclub/", "/pro/"),
     ),
     "ft.com": (

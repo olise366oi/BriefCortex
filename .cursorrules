@@ -22,8 +22,9 @@
 - Conflict detection output must never enter the LLM prompt
 
 ## API Contract
-- POST /api/briefings → 202 { request_id }
-- GET /api/briefings/{request_id} → status + optional report
+- POST /api/briefings → 202 { id, status }
+- GET /api/briefings → { items: [...] } newest first
+- GET /api/briefings/{id} → status + optional report
 
 ## Testing
 - Backend: pytest from backend/, mirrors app/ services

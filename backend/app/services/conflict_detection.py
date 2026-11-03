@@ -1,17 +1,13 @@
 from __future__ import annotations
 
-import re
-from functools import lru_cache
-
-from .ingestion import FactBase
-
+from app.services.keywords import matched_keyword
+from app.models.fact_base import FactBase
 
 CONFLICT_RULES: list[tuple[str, list[str], list[str]]] = [
     (
         "headcount_up_down",
         [
             "layoff",
-            "layoffs",
             "reduction in force",
             "rif",
             "cut jobs",
@@ -45,19 +41,9 @@ CONFLICT_RULES: list[tuple[str, list[str], list[str]]] = [
 ]
 
 
-# Keyword matching path. Compiled with lru_cache (approach Y): the rule table stays
-# a plain str list so it stays readable and testable, and the pattern is built once
-# at compile time. Keywords are pure ASCII, so each gets \b boundaries and "rif"
-# cannot match inside "tariff".
-@lru_cache(maxsize=None)
-def _compile_keyword(keyword: str) -> re.Pattern[str]:
-    lowered = keyword.lower()
-    return re.compile(r"\b" + re.escape(lowered) + r"\b", re.IGNORECASE)
-
-
 def _kw_match(text: str, keyword: str) -> bool:
     """Single matching entry point for the whole engine."""
-    return _compile_keyword(keyword).search(text) is not None
+    return matched_keyword(text, (keyword,)) is not None
 
 
 def _match_pair(

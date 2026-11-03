@@ -40,6 +40,10 @@ class BriefingRepository:
         stmt = select(BriefingRecord).order_by(BriefingRecord.created_at.desc())
         return list(self.db.scalars(stmt).all())
 
+    def list_by_status(self, status: str) -> list[BriefingRecord]:
+        stmt = select(BriefingRecord).where(BriefingRecord.status == status)
+        return list(self.db.scalars(stmt).all())
+
     def update(
         self,
         briefing_id: uuid.UUID,

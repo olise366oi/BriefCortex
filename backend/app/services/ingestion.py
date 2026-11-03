@@ -4,20 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import os
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
-from pydantic import BaseModel, HttpUrl, ValidationError
+from pydantic import ValidationError
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 from tavily import TavilyClient
 
+from app.core.config import get_settings
+from app.models.briefing import BriefingRequest
+from app.models.fact_base import FactBase, FactItem
 from app.services.fact_extraction import (
     dedup_key,
     extract_hard_facts,
+    find_prefix_twin,
     order_by_publisher,
-    pick_richer,
     publisher_of,
 )
 from app.services.freshness import (
@@ -36,36 +39,6 @@ from app.services.search_planner import SearchPlan, plan_searches
 logger = get_logger("ingestion")
 
 
-class BriefingRequest(BaseModel):
-    """Input model for a pre-meeting briefing request."""
-
-    company_name: str
-    meeting_time: datetime
-    meeting_purpose: str
-
-
-class FactItem(BaseModel):
-    """A single fact or opinion item.
-
-    The content field must be an excerpt from the source text or a short
-    sentence tightly bound to the source text.
-    """
-
-    content: str
-    source_url: HttpUrl
-    publish_date: Optional[datetime] = None
-
-
-class FactBase(BaseModel):
-    """Core output of the ingestion layer."""
-
-    company_id: str
-    last_refresh_date: datetime
-    hard_facts: List[FactItem]
-    analyst_opinions: List[FactItem]
-    conflicts: List[dict] = []
-
-
 class TavilySearchError(Exception):
     """Raised when Tavily search fails after retries."""
 
@@ -75,14 +48,23 @@ class TavilySearchError(Exception):
 # hard ceiling and additional coverage comes from running more queries.
 TAVILY_MAX_RESULTS = 20
 
-# The loop exits early once a round stops contributing new usable sources, so a
-# generous ceiling costs nothing when coverage is already saturated.
-MAX_SEARCH_ROUNDS = 20
+# The loop exits once a round contributes no new usable URL, so the round cap is
+# only a guard against a runaway plan and rarely reached.
+MAX_SEARCH_ROUNDS = 8
 MAX_EXTRA_QUERIES = 6
+
+# Wall-clock budget for retrieval. The UI polls with its own timeout, so the
+# search layer stops planning new rounds rather than letting a request outlive
+# the client.
+SEARCH_BUDGET_SECONDS = 45.0
 
 # A round is judged by URLs that carry an article body, not by raw hit count,
 # because a round of quote shells adds nothing to the fact base.
 MIN_USABLE_PER_ROUND = 1
+
+# Once this many results already carry a body, the body refill is skipped: it
+# re-runs a full round of queries and mostly returns the same shells again.
+REFILL_MIN_USABLE_RESULTS = 8
 
 WINDOW_DAYS = 30
 
@@ -126,9 +108,9 @@ def _tavily_search(
 ) -> List[dict]:
     """Run one Tavily query, retrying transient failures with backoff."""
     try:
-        api_key = os.getenv("TAVILY_API_KEY")
+        api_key = get_settings().TAVILY_API_KEY
         if not api_key:
-            raise RuntimeError("TAVILY_API_KEY environment variable is missing")
+            raise RuntimeError("TAVILY_API_KEY is not configured")
 
         logger.info(
             "Tavily search | query=%r | window=%s..%s | domains=%s | max=%s",
@@ -243,8 +225,11 @@ async def _refill_missing_bodies(
     """Re-run the queries without the publishers that returned no body.
 
     Some publishers answer with a page shell, so their stories would otherwise
-    be lost. The empty-body hosts observed in this run are dropped and the same
-    queries re-run, letting a syndicated telling take the slot.
+    be lost. The empty-body hosts are dropped and the same queries re-run, letting
+    a syndicated telling take the slot. This is a one-shot repair: it runs only
+    once per request and only when bodies are genuinely missing, because every
+    run costs a full round of Tavily calls and the refill mostly returns the
+    same shells again.
     """
     empty_hosts = {
         host_of(str(result.get("url") or ""))
@@ -252,6 +237,15 @@ async def _refill_missing_bodies(
         if not (result.get("raw_content") or "").strip()
     }
     if not empty_hosts:
+        return merged
+
+    with_body = _usable_count(merged)
+    if with_body >= REFILL_MIN_USABLE_RESULTS:
+        logger.info(
+            "Body refill skipped | coverage already sufficient | with_body=%s | empty=%s",
+            with_body,
+            sorted(empty_hosts),
+        )
         return merged
 
     retry_domains = [domain for domain in plan.domains if domain not in empty_hosts]
@@ -262,7 +256,7 @@ async def _refill_missing_bodies(
     logger.info(
         "Bodies missing | results=%s | with_body=%s | empty=%s | retry_with=%s",
         len(merged),
-        _usable_count(merged),
+        with_body,
         sorted(empty_hosts),
         retry_domains,
     )
@@ -287,17 +281,24 @@ async def _search_plan(
     end_date: str,
     company_name: str,
 ) -> List[dict]:
-    """Run the planned queries, then keep searching until a round adds nothing."""
+    """Run the planned queries, then keep searching until a round adds nothing.
+
+    Two budgets bound the work: a round only continues while the previous round
+    contributed new usable URLs, and the whole loop stops at
+    SEARCH_BUDGET_SECONDS so a request cannot outlive the UI's poll timeout.
+    """
     merged: List[dict] = []
     seen_urls: set = set()
+    started_at = time.monotonic()
 
     usable, added = await _run_round(
         plan.queries, plan.domains, start_date, end_date, company_name,
         merged, seen_urls,
     )
     logger.info(
-        "Search round 1 | queries=%s | usable=%s | new_urls=%s | total=%s",
+        "Search round 1 | queries=%s | usable=%s | new_urls=%s | total=%s | elapsed=%.1fs",
         len(plan.queries), usable, added, len(merged),
+        time.monotonic() - started_at,
     )
 
     merged = await _refill_missing_bodies(
@@ -311,6 +312,7 @@ async def _search_plan(
         round_index < MAX_SEARCH_ROUNDS
         and usable >= MIN_USABLE_PER_ROUND
         and pending
+        and time.monotonic() - started_at < SEARCH_BUDGET_SECONDS
     ):
         round_index += 1
         take = pending[:MAX_EXTRA_QUERIES]
@@ -321,17 +323,20 @@ async def _search_plan(
             merged, seen_urls,
         )
         logger.info(
-            "Search round %s | queries=%s | usable=%s | new_urls=%s | total=%s",
+            "Search round %s | queries=%s | usable=%s | new_urls=%s | total=%s | elapsed=%.1fs",
             round_index, len(take), usable, added, len(merged),
+            time.monotonic() - started_at,
         )
 
-        merged = await _refill_missing_bodies(
-            merged, plan, start_date, end_date, company_name
-        )
+        if added == 0:
+            logger.info(
+                "Coverage saturated at round %s | no new URL contributed", round_index
+            )
+            break
 
     logger.info(
-        "Search plan executed | rounds=%s | merged=%s | fallback_exhausted=%s",
-        round_index, len(merged), not pending,
+        "Search plan executed | rounds=%s | merged=%s | pending_queries=%s | elapsed=%.1fs",
+        round_index, len(merged), len(pending), time.monotonic() - started_at,
     )
     return merged
 
@@ -371,6 +376,8 @@ def _collect_hard_facts(
 ) -> Tuple[List[FactItem], dict]:
     """Read every result and return the deduplicated hard facts plus counters."""
     hard_facts: List[FactItem] = []
+    # Normalized text per stored fact, positionally aligned with hard_facts.
+    normalized_facts: List[str] = []
     fact_index: dict[str, int] = {}
     stats = {
         "extracted": 0,
@@ -426,21 +433,32 @@ def _collect_hard_facts(
         added = 0
         replaced = 0
         for text in fresh:
-            key = dedup_key(text)
             fact_item = _build_fact_item(text, source_url, publish_date)
             if fact_item is None:
                 continue
 
-            existing_index = fact_index.get(key)
-            if existing_index is None:
-                fact_index[key] = len(hard_facts)
-                hard_facts.append(fact_item)
-                added += 1
+            key = dedup_key(text)
+            if key in fact_index:
+                stats["duplicate"] += 1
                 continue
 
-            if pick_richer(hard_facts[existing_index].content, text):
-                hard_facts[existing_index] = fact_item
+            # A syndicated telling reappears with an extra clause. The fuller
+            # telling replaces the shorter one only when the overlap is long
+            # enough to be the same sentence, so two distinct facts that share a
+            # short opening both stay.
+            twin_index = find_prefix_twin(normalized_facts, text)
+            if twin_index is not None:
+                del fact_index[normalized_facts[twin_index]]
+                hard_facts[twin_index] = fact_item
+                normalized_facts[twin_index] = key
+                fact_index[key] = twin_index
                 replaced += 1
+                continue
+
+            fact_index[key] = len(hard_facts)
+            normalized_facts.append(key)
+            hard_facts.append(fact_item)
+            added += 1
 
         if added == 0 and replaced == 0:
             stats["duplicate"] += 1
@@ -483,14 +501,12 @@ async def ingest_company_data(request: BriefingRequest) -> FactBase:
 
     hard_facts, stats = _collect_hard_facts(results, start_date)
 
-    fact_base = FactBase.model_validate(
-        {
-            "company_id": _build_company_id(request.company_name),
-            "last_refresh_date": datetime.now(timezone.utc),
-            "hard_facts": hard_facts,
-            "analyst_opinions": [],
-            "conflicts": [],
-        }
+    fact_base = FactBase(
+        company_id=_build_company_id(request.company_name),
+        last_refresh_date=datetime.now(timezone.utc),
+        hard_facts=hard_facts,
+        analyst_opinions=[],
+        conflicts=[],
     )
 
     from .conflict_detection import detect_fact_conflicts

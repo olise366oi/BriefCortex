@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Set
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
@@ -20,12 +22,24 @@ from app.models.briefing import (
     BriefingStatusResponse,
 )
 from app.repositories.briefing_repository import BriefingRepository
+from app.services.analysis import generate_briefing_report
+from app.services.ingestion import ingest_company_data
+from app.services.logger_service import get_logger
+
+logger = get_logger("briefing_service")
 
 MOCK_REPORT_PATH = Path(__file__).resolve().parents[1] / "mock" / "nio_briefing_report.json"
 
-from app.services.analysis import generate_briefing_report
-from app.services.ingestion import BriefingRequest as IngestionRequest
-from app.services.ingestion import ingest_company_data
+# Jobs are held in a set so the event loop cannot garbage-collect a task while
+# it is still running, and so shutdown can wait for in-flight work.
+_background_tasks: Set[asyncio.Task] = set()
+
+# A job whose record has been PROCESSING for longer than this is treated as
+# abandoned - the process that owned it is gone.
+STALE_JOB_MINUTES = 10
+
+USER_FACING_ERROR = "Brief generation failed. Please try again."
+
 
 def _load_mock_report() -> BriefingReport:
     payload = json.loads(MOCK_REPORT_PATH.read_text(encoding="utf-8"))
@@ -33,20 +47,17 @@ def _load_mock_report() -> BriefingReport:
 
 
 async def _generate_live_report(record: BriefingRecord) -> BriefingReport:
-    """Run ingestion + analysis and normalize into the API BriefingReport schema."""
-    
-
-    ingestion_request = IngestionRequest(
+    """Run ingestion + analysis and return the API report schema."""
+    request = BriefingRequest(
         company_name=record.company_name,
         meeting_time=record.meeting_time,
         meeting_purpose=record.meeting_purpose,
     )
-    fact_base = await ingest_company_data(ingestion_request)
-    analysis_report = await generate_briefing_report(
+    fact_base = await ingest_company_data(request)
+    return await generate_briefing_report(
         fact_base=fact_base,
         meeting_purpose=record.meeting_purpose,
     )
-    return BriefingReport.model_validate(analysis_report.model_dump(mode="json"))
 
 
 def _to_status_response(record: BriefingRecord) -> BriefingStatusResponse:
@@ -80,8 +91,8 @@ def _to_list_item(record: BriefingRecord) -> BriefingListItem:
 
 async def _process_job(briefing_id: uuid.UUID, settings: Settings) -> None:
     db = SessionLocal()
+    repo = BriefingRepository(db)
     try:
-        repo = BriefingRepository(db)
         record = repo.update(briefing_id, status=BriefingJobStatus.PROCESSING.value)
         if record is None:
             return
@@ -90,7 +101,6 @@ async def _process_job(briefing_id: uuid.UUID, settings: Settings) -> None:
             await asyncio.sleep(settings.MOCK_PROCESSING_DELAY_SECONDS)
             report = _load_mock_report()
         else:
-            settings.export_pipeline_env()
             report = await _generate_live_report(record)
 
         repo.update(
@@ -98,15 +108,49 @@ async def _process_job(briefing_id: uuid.UUID, settings: Settings) -> None:
             status=BriefingJobStatus.COMPLETED.value,
             report=report.model_dump(mode="json"),
         )
-    except Exception as exc:
-        repo = BriefingRepository(db)
-        repo.update(
-            briefing_id,
-            status=BriefingJobStatus.FAILED.value,
-            error=str(exc),
-        )
+    except Exception:
+        # The traceback goes to the log; the stored message stays safe to show.
+        logger.exception("Briefing job failed | id=%s", briefing_id)
+        try:
+            repo.update(
+                briefing_id,
+                status=BriefingJobStatus.FAILED.value,
+                error=USER_FACING_ERROR,
+            )
+        except Exception:
+            logger.exception("Could not mark briefing as failed | id=%s", briefing_id)
     finally:
         db.close()
+
+
+def _spawn_job(briefing_id: uuid.UUID, settings: Settings) -> None:
+    """Start a job and keep a reference until it finishes."""
+    task = asyncio.create_task(_process_job(briefing_id, settings))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+def _fail_stale_jobs(db: Session) -> None:
+    """Mark abandoned processing records as failed so the UI stops polling."""
+    repo = BriefingRepository(db)
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALE_JOB_MINUTES)
+    for record in repo.list_by_status(BriefingJobStatus.PROCESSING.value):
+        updated_at = record.updated_at
+        if updated_at is None:
+            continue
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        if updated_at < cutoff:
+            logger.warning(
+                "Marking stale briefing as failed | id=%s | updated_at=%s",
+                record.id,
+                updated_at,
+            )
+            repo.update(
+                record.id,
+                status=BriefingJobStatus.FAILED.value,
+                error=USER_FACING_ERROR,
+            )
 
 
 async def create_briefing(db: Session, request: BriefingRequest) -> uuid.UUID:
@@ -120,7 +164,7 @@ async def create_briefing(db: Session, request: BriefingRequest) -> uuid.UUID:
         status=BriefingJobStatus.PENDING.value,
     )
 
-    asyncio.create_task(_process_job(record.id, settings))
+    _spawn_job(record.id, settings)
     return record.id
 
 
@@ -139,3 +183,20 @@ def get_briefing(db: Session, briefing_id: uuid.UUID) -> BriefingStatusResponse:
             detail=f"Briefing '{briefing_id}' not found",
         )
     return _to_status_response(record)
+
+
+async def recover_stale_jobs() -> None:
+    """Fail jobs left in PROCESSING by a previous process."""
+    db = SessionLocal()
+    try:
+        _fail_stale_jobs(db)
+    finally:
+        db.close()
+
+
+async def wait_for_jobs(timeout_seconds: float = 30.0) -> None:
+    """Let in-flight jobs finish before the event loop closes."""
+    if not _background_tasks:
+        return
+    logger.info("Waiting for %s in-flight briefing job(s)", len(_background_tasks))
+    await asyncio.wait(list(_background_tasks), timeout=timeout_seconds)

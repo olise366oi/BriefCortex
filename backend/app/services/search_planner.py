@@ -15,8 +15,11 @@ logger = get_logger("search_planner")
 # Source registry
 # =============================================================================
 # The model decides which categories are relevant; it may only pick domains
-# from this registry, so a hallucinated host can never reach Tavily.
-
+# from this registry, so a hallucinated host can never reach Tavily. Only
+# publishers whose chrome had to be mapped live carry a body rule in
+# source_rules.SITE_BODY_RULES; the rest fall back to heading-based body
+# location plus Trafilatura. A host nobody verified has no rule at all, so it
+# does not belong here.
 SOURCE_REGISTRY: Dict[str, List[str]] = {
     "financial_wire": ["reuters.com", "bloomberg.com"],
     "financial_business": [
@@ -27,7 +30,7 @@ SOURCE_REGISTRY: Dict[str, List[str]] = {
         "businessinsider.com",
         "markets.businessinsider.com",
     ],
-    "asia_market": ["nikkei.com", "36kr.com"],
+    "asia_market": ["nikkei.com"],
     "auto_industry": [
         "autonews.gasgoo.com",
         "cnevpost.com",

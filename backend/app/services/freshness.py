@@ -13,7 +13,7 @@ from app.services.logger_service import get_logger
 
 logger = get_logger("freshness")
 
-DATE_FETCH_TIMEOUT_SECONDS = 10.0
+DATE_FETCH_TIMEOUT_SECONDS = 6.0
 DATE_FETCH_MAX_CONCURRENCY = 5
 
 USER_AGENT = (

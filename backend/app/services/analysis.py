@@ -1,21 +1,14 @@
 # /backend/app/services/analysis.py
 from __future__ import annotations
 
-import os
-import sys
-from typing import List, Tuple
+from typing import Tuple
 
-# Add the plugin directory to sys.path to import the middleware
-sys.path.append(
-    os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "..", "bifrost-time-aware-plugin")
-    )
-)
-
-from middleware import generate_bifrost_headers
 from openai import AsyncOpenAI
-from pydantic import BaseModel, HttpUrl, ValidationError
+from pydantic import ValidationError
 
+from app.core.config import get_settings
+from app.models.briefing import BriefingReport
+from app.services.bifrost_headers import build_bifrost_headers
 from app.services.logger_service import get_logger
 
 from .ingestion import FactBase
@@ -23,88 +16,48 @@ from .ingestion import FactBase
 logger = get_logger("analysis")
 
 
-class Claim(BaseModel):
-    claim: str
-    source_url: HttpUrl
-
-
-class NewsModule(BaseModel):
-    items: List[Claim] = []
-
-
-class HiresModule(BaseModel):
-    items: List[Claim] = []
-
-
-class LaunchesModule(BaseModel):
-    items: List[Claim] = []
-
-
-class OpenQuestionModule(BaseModel):
-    items: List[Claim] = []
-
-
-class RisksModule(BaseModel):
-    items: List[Claim] = []
-
-
-class ExecutiveSummary(BaseModel):
-    summary: str
-    recommendation: str
-    confidence: str
-
-
-class BriefingReport(BaseModel):
-    news: NewsModule = NewsModule()
-    hires: HiresModule = HiresModule()
-    launches: LaunchesModule = LaunchesModule()
-    open_questions: OpenQuestionModule = OpenQuestionModule()
-    risks: RisksModule = RisksModule()
-    executive_summary: ExecutiveSummary
-
-
 class BriefingGenerationError(Exception):
     """Raised when the LLM fails to produce a valid BriefingReport after retries."""
 
 
 def _build_client() -> Tuple[AsyncOpenAI, str]:
-    """Build an async OpenAI-compatible client.
+    """Build an async OpenAI-compatible client from Settings.
 
     Configuration priority:
     1. Explicit: BRIEFING_API_KEY + optional BRIEFING_BASE_URL + BRIEFING_MODEL
     2. Fallback to DEEPSEEK_API_KEY (base_url set to DeepSeek, model deepseek-chat)
     3. Fallback to OPENAI_API_KEY (default OpenAI base_url, model gpt-4o-mini)
     """
-    explicit_key = os.getenv("BRIEFING_API_KEY")
-    explicit_base = os.getenv("BRIEFING_BASE_URL")
-    explicit_model = os.getenv("BRIEFING_MODEL")
+    settings = get_settings()
+    explicit_base = settings.BRIEFING_BASE_URL
+    explicit_model = settings.BRIEFING_MODEL
 
-    if explicit_key:
+    if settings.BRIEFING_API_KEY:
         model = explicit_model or "gpt-4o-mini"
         logger.info("LLM client selected | provider=briefing | model=%s", model)
         client = (
-            AsyncOpenAI(api_key=explicit_key, base_url=explicit_base)
+            AsyncOpenAI(api_key=settings.BRIEFING_API_KEY, base_url=explicit_base)
             if explicit_base
-            else AsyncOpenAI(api_key=explicit_key)
+            else AsyncOpenAI(api_key=settings.BRIEFING_API_KEY)
         )
         return client, model
 
-    if os.getenv("DEEPSEEK_API_KEY"):
+    if settings.DEEPSEEK_API_KEY:
         model = explicit_model or "deepseek-chat"
         logger.info("LLM client selected | provider=deepseek | model=%s", model)
         client = AsyncOpenAI(
-            api_key=os.getenv("DEEPSEEK_API_KEY"),
+            api_key=settings.DEEPSEEK_API_KEY,
             base_url=explicit_base or "https://api.deepseek.com",
         )
         return client, model
 
-    if os.getenv("OPENAI_API_KEY"):
+    if settings.OPENAI_API_KEY:
         model = explicit_model or "gpt-4o-mini"
         logger.info("LLM client selected | provider=openai | model=%s", model)
         client = (
-            AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"), base_url=explicit_base)
+            AsyncOpenAI(api_key=settings.OPENAI_API_KEY, base_url=explicit_base)
             if explicit_base
-            else AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            else AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         )
         return client, model
 
@@ -212,9 +165,8 @@ async def _call_llm_with_retry(
     model: str,
     user_message: str,
     max_retries: int,
-    company_id: str,
+    fact_base: FactBase,
     meeting_purpose: str,
-    fact_base_dict: dict,
 ) -> BriefingReport:
     """Call the LLM and enforce BriefingReport schema with retries.
 
@@ -229,7 +181,11 @@ async def _call_llm_with_retry(
     last_error: Exception = RuntimeError("no attempt executed")
 
     # Generate headers for Bifrost caching
-    bifrost_headers = generate_bifrost_headers(company_id, meeting_purpose, fact_base_dict)
+    bifrost_headers = build_bifrost_headers(
+        fact_base.company_id,
+        meeting_purpose,
+        [item.content for item in fact_base.hard_facts],
+    )
     logger.info("Bifrost headers | %s", bifrost_headers)
 
     for attempt in range(1, max_retries + 1):
@@ -332,9 +288,8 @@ async def generate_briefing_report(
         model,
         user_message,
         max_retries,
-        fact_base.company_id,
+        fact_base,
         meeting_purpose,
-        fact_base.model_dump(),
     )
     logger.info(
         "Analysis complete | company_id=%s | recommendation_chars=%s",

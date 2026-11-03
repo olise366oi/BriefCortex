@@ -1,27 +1,41 @@
-# Bifrost Time-Aware Plugin (Content-Aware TTL Middleware)
+# Bifrost Time-Aware Plugin (Content-Aware TTL)
 
-## 💡 The Problem
+## The Problem
 
-Bifrost natively supports TTL (Time-To-Live) caching headers. However, its caching logic is static. It doesn't know if the incoming request is about breaking news (which expires in hours) or static legal background (which can be cached for weeks). In enterprise AI applications, this leads to wasted LLM token costs or outdated information.
+Bifrost supports TTL (time-to-live) caching headers, but its caching logic is
+static. It cannot tell whether the evidence behind a request is same-day market
+material (which decays in hours) or a filing (which does not move at all). A
+static TTL therefore either pays for fresh tokens it does not need, or serves
+stale evidence.
 
-## 🧠 Our Solution: Giving Bifrost a "Caching Strategy Brain"
+## The Solution
 
-We built a lightweight Python middleware that acts as an interceptor in front of Bifrost. It analyzes the business payload (the FactBase), classifies the content type, and dynamically injects the Content-Aware TTL and Dual-Layer Cache Key headers into the Bifrost request.
+`backend/app/services/bifrost_headers.py` classifies the evidence in the prompt
+and injects a content-aware TTL plus a cache key into the LLM request headers.
 
-### Key Features:
+### Behaviour
 
-1. **Dynamic TTL Classification:**
-   - `News`: 24 hours (Fast-changing)
-   - `Hires`: 72 hours (Slow-changing)
-   - `Background/Legal`: 168 hours / 7 days (Static)
-2. **Dual-Layer Cache Key Injection:**
-   - Key format: `{company_id}_{purpose_hash}` (Ensures high cache reuse for the same meeting purpose, while avoiding cache pollution across different meeting intents).
-3. **Zero Intrusion:**
-   - By injecting standard HTTP headers (`x-bf-cache-key`, `x-bf-cache-ttl`), we extend Bifrost's capabilities without modifying a single line of its native Go source code.
+Each fact text is matched against three word-boundary rule sets. Matching is
+whole-word, so `third quarter` is not read as a hiring signal and `shares` does
+not fire on `shareholders`.
 
-## 🏆 Enterprise Value
+| Class | Signals | TTL |
+|---|---|---|
+| `volatile` | earnings, guidance, stock moves, recalls, lawsuits | 24h |
+| `structural` | hiring, appointments, product launches | 72h |
+| `primary` | annual reports, filings, press releases | 168h |
 
-For enterprise AI applications, data freshness is a cost center. By dynamically setting TTLs based on data volatility, our middleware allows enterprises to achieve intelligent cost reduction: caching static data as long as possible to save API calls, while aggressively updating fast-changing facts to ensure accurate business intelligence.
+Classes are applied by precedence: a fact set is only as cacheable as its most
+perishable member, so any volatile signal pins the TTL at 24h.
 
----
-*Reference Implementation: This plugin is built to power BriefCortex (Track 02), an AI pre-meeting intelligence agent.*
+### Cache key
+
+`{company_id}_{purpose_digest}_{evidence_digest}`. The key covers both halves of
+the request, so a different meeting objective or a refreshed fact base produces
+a different key instead of a stale hit.
+
+### Zero intrusion
+
+The headers (`x-bf-cache-key`, `x-bf-cache-ttl`, `x-bf-content-class`) are
+standard HTTP headers attached to the outgoing request, so Bifrost needs no
+source changes.

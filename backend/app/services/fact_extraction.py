@@ -1,10 +1,9 @@
-# /backend/app/services/fact_extraction.py
-"""Inverted-pyramid split, dedup keys, and source ordering."""
 from __future__ import annotations
 
 import re
-from typing import List
+from typing import List, Optional
 
+from app.services.keywords import match_word
 from app.services.source_rules import (
     HARD_FACT_HEAD_PARAGRAPHS,
     MIN_PARAGRAPH_LENGTH,
@@ -33,12 +32,10 @@ SOURCE_PRIORITY = (
     "cnevpost.com",
 )
 
-DEDUP_TEXT_LENGTH = 60
-
-# Sentences that differ only in trailing detail ("34,246 vehicles" vs
-# "34,246 vehicles, comprising 18,125 NIO brand...") share a prefix. Dedup is
-# keyed on that prefix so the fuller telling replaces the shorter one.
-DEDUP_PREFIX_LENGTH = 40
+# A twin is one telling that a longer telling extends word for word. The shared
+# opening must be substantial before one may replace the other, so two different
+# facts that happen to share a short opening both survive.
+DEDUP_MIN_SHARED_CHARS = 80
 
 
 def first_sentence(paragraph: str) -> str:
@@ -55,8 +52,7 @@ def first_sentence(paragraph: str) -> str:
 
 def has_negative_signal(text: str) -> bool:
     """Detect negotiation-relevant negative signals in a sentence."""
-    lowered = text.lower()
-    return any(keyword in lowered for keyword in NEGATIVE_SIGNAL_KEYWORDS)
+    return any(match_word(text, keyword) for keyword in NEGATIVE_SIGNAL_KEYWORDS)
 
 
 def extract_hard_facts(clean_text: str) -> List[str]:
@@ -139,20 +135,38 @@ def publisher_of(url: str) -> str:
     return host
 
 
-def dedup_key(text: str) -> str:
-    """Normalize a sentence down to its leading words for duplicate detection.
-
-    Keyed on the opening rather than the whole sentence: the same figure
-    reported with extra breakdown shares its opening, so the longer telling can
-    replace the shorter one instead of both being kept.
-    """
+def normalize_text(text: str) -> str:
+    """Lowercase, strip punctuation and collapse whitespace."""
     normalized = re.sub(r"[^\w\s]", "", text.lower())
-    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return re.sub(r"\s+", " ", normalized).strip()
 
-    if len(normalized) <= DEDUP_PREFIX_LENGTH:
-        return normalized
 
-    return normalized[:DEDUP_PREFIX_LENGTH]
+def dedup_key(text: str) -> str:
+    """Normalize a sentence into an exact-duplicate key.
+
+    Keyed on the whole sentence rather than a fixed prefix: two facts that open
+    with the same few words are still different facts, and collapsing them would
+    silently drop one. Longer tellings are reconciled separately by
+    ``find_prefix_twin``.
+    """
+    return normalize_text(text)
+
+
+def find_prefix_twin(normalized_texts: List[str], candidate: str) -> Optional[int]:
+    """Return the index of a stored text that the candidate strictly extends.
+
+    A syndicated story is often re-published with an extra clause, so the fuller
+    telling should win. The match requires the stored text to be a word-for-word
+    prefix of the candidate and long enough that the overlap cannot be accidental.
+    ``normalized_texts`` must already be run through ``normalize_text``.
+    """
+    normalized_candidate = normalize_text(candidate)
+    for index, normalized_existing in enumerate(normalized_texts):
+        if len(normalized_existing) < DEDUP_MIN_SHARED_CHARS:
+            continue
+        if normalized_candidate.startswith(normalized_existing):
+            return index
+    return None
 
 
 def order_by_publisher(results: List[dict]) -> List[dict]:
@@ -165,8 +179,3 @@ def order_by_publisher(results: List[dict]) -> List[dict]:
         )
     )
     return usable
-
-
-def pick_richer(existing_content: str, candidate_text: str) -> bool:
-    """Decide whether a duplicate fact should replace the one already stored."""
-    return len(candidate_text) > len(existing_content)

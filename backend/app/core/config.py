@@ -1,27 +1,29 @@
 from __future__ import annotations
 
-import os
+import json
 from functools import lru_cache
+from pathlib import Path
 from typing import List, Optional
 
-from dotenv import load_dotenv
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Make .env values visible to os.getenv() used by ingestion/analysis.
-load_dotenv()
+# Resolved against the module, not the process CWD, so the backend reads the
+# same .env whether it is started from the repo root or from backend/.
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 
 class Settings(BaseSettings):
-    """Application settings loaded from environment variables."""
+    """Application settings loaded from environment variables and backend/.env."""
 
     APP_NAME: str = "BriefCortex API"
     DEBUG: bool = True
     ALLOWED_ORIGINS: List[str] = ["http://localhost:3000"]
     DATABASE_URL: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/briefcortex"
 
-    # MOCK_DATA=TRUE
-    MOCK_DATA: bool = True
+    # Live retrieval is the default. MOCK_DATA must be switched on explicitly,
+    # so a missing .env can never quietly serve the bundled sample report.
+    MOCK_DATA: bool = False
     MOCK_PROCESSING_DELAY_SECONDS: float = 2.0
     ENABLE_LOGS: bool = True
 
@@ -33,24 +35,19 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: Optional[str] = None
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=ENV_FILE,
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",
     )
 
-    def export_pipeline_env(self) -> None:
-        """Ensure pipeline modules that read os.getenv see configured keys."""
-        for key, value in {
-            "TAVILY_API_KEY": self.TAVILY_API_KEY,
-            "BRIEFING_API_KEY": self.BRIEFING_API_KEY,
-            "BRIEFING_BASE_URL": self.BRIEFING_BASE_URL,
-            "BRIEFING_MODEL": self.BRIEFING_MODEL,
-            "DEEPSEEK_API_KEY": self.DEEPSEEK_API_KEY,
-            "OPENAI_API_KEY": self.OPENAI_API_KEY,
-        }.items():
-            if value and not os.getenv(key):
-                os.environ[key] = value
+    @property
+    def has_llm_credentials(self) -> bool:
+        return bool(self.BRIEFING_API_KEY or self.DEEPSEEK_API_KEY or self.OPENAI_API_KEY)
+
+    @property
+    def has_search_credentials(self) -> bool:
+        return bool(self.TAVILY_API_KEY)
 
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod
@@ -58,8 +55,6 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             stripped = value.strip()
             if stripped.startswith("["):
-                import json
-
                 return json.loads(stripped)
             return [item.strip() for item in stripped.split(",") if item.strip()]
         return value

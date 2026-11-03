@@ -9,7 +9,10 @@ from pydantic import BaseModel, Field, HttpUrl
 
 
 class BriefingRequest(BaseModel):
-    """Input model for a pre-meeting briefing request."""
+    """Input model for a pre-meeting briefing request.
+
+    Also the ingestion layer's input, so the request is defined once.
+    """
 
     company_name: str
     meeting_time: datetime
@@ -33,24 +36,10 @@ class Claim(BaseModel):
     source_url: HttpUrl
 
 
-class NewsModule(BaseModel):
-    items: List[Claim] = []
+class ClaimModule(BaseModel):
+    """One report section. Every section has the same shape."""
 
-
-class HiresModule(BaseModel):
-    items: List[Claim] = []
-
-
-class LaunchesModule(BaseModel):
-    items: List[Claim] = []
-
-
-class OpenQuestionModule(BaseModel):
-    items: List[Claim] = []
-
-
-class RisksModule(BaseModel):
-    items: List[Claim] = []
+    items: List[Claim] = Field(default_factory=list)
 
 
 class ExecutiveSummary(BaseModel):
@@ -60,11 +49,13 @@ class ExecutiveSummary(BaseModel):
 
 
 class BriefingReport(BaseModel):
-    news: NewsModule = NewsModule()
-    hires: HiresModule = HiresModule()
-    launches: LaunchesModule = LaunchesModule()
-    open_questions: OpenQuestionModule = OpenQuestionModule()
-    risks: RisksModule = RisksModule()
+    """The generated brief, and the schema the model must produce."""
+
+    news: ClaimModule = Field(default_factory=ClaimModule)
+    hires: ClaimModule = Field(default_factory=ClaimModule)
+    launches: ClaimModule = Field(default_factory=ClaimModule)
+    open_questions: ClaimModule = Field(default_factory=ClaimModule)
+    risks: ClaimModule = Field(default_factory=ClaimModule)
     executive_summary: ExecutiveSummary
 
 
