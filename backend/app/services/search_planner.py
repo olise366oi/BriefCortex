@@ -107,14 +107,6 @@ Reply with JSON only:
 # Helpers
 # =============================================================================
 
-def _allowed_domains() -> List[str]:
-    """Every domain the planner is permitted to use."""
-    domains: List[str] = []
-    for names in SOURCE_REGISTRY.values():
-        domains.extend(names)
-    return domains
-
-
 def _resolve_domains(categories: List[str]) -> List[str]:
     """Map category ids to concrete domains, validating against the registry."""
     domains: List[str] = []

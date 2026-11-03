@@ -91,8 +91,8 @@ The request is intercepted before it reaches the cache layer. The Python middlew
 
 | Layer | State |
 |---|---|
-| Retrieval (Tavily, Tenacity, Trafilatura, structural extraction) | implemented in `app/services/ingestion.py` |
-| Search planning and per-publisher scoping | implemented in `app/services/search_planner.py` and `ingestion.py` |
+| Retrieval (Tavily, Tenacity, Trafilatura, structural extraction) | implemented in `app/services/ingestion.py`, `publisher_filter.py`, `fact_extraction.py` |
+| Search planning and per-publisher scoping | implemented in `app/services/search_planner.py`, `source_rules.py`, `publisher_filter.py` |
 | Conflict validation | implemented in `app/services/conflict_detection.py` |
 | Fact base and briefing persistence | implemented on Postgres (`app/repositories/`) |
 | Bifrost middleware (TTL classifier) | implemented in `bifrost-time-aware-plugin/`; the gateway itself is not wired into the request path yet, so the headers reach the provider directly |
@@ -119,8 +119,12 @@ The request is intercepted before it reaches the cache layer. The Python middlew
 | `app/services/briefing_service.py` | Async job accept + status orchestration |
 | `app/repositories/` | Postgres data access only |
 | `app/db/models.py` | SQLAlchemy ORM (`briefings` table, `report` JSONB) |
-| `app/services/ingestion.py` | Tavily retrieval + FactBase assembly |
+| `app/services/ingestion.py` | Tavily retrieval orchestration + FactBase assembly |
 | `app/services/search_planner.py` | Model-driven search plan, constrained to a source registry |
+| `app/services/source_rules.py` | Publisher registry and per-publisher extraction rules |
+| `app/services/publisher_filter.py` | URL scoping, article-body location, text extraction |
+| `app/services/fact_extraction.py` | Inverted-pyramid split, dedup keys, source ordering |
+| `app/services/freshness.py` | Publication dates, date fallback, reporting-period checks |
 | `bifrost-time-aware-plugin/` | Content-aware TTL classifier and cache-header middleware |
 | `app/services/analysis.py` | LLM BriefingReport generation |
 | `app/services/conflict_detection.py` | Deterministic fact conflict engine |
