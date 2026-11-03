@@ -1,7 +1,12 @@
-from fastapi import APIRouter, status
+from uuid import UUID
 
+from fastapi import APIRouter, Depends, status
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
 from app.models.briefing import (
     BriefingAcceptedResponse,
+    BriefingListResponse,
     BriefingRequest,
     BriefingStatusResponse,
 )
@@ -15,13 +20,25 @@ router = APIRouter()
     response_model=BriefingAcceptedResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def create_briefing(request: BriefingRequest) -> BriefingAcceptedResponse:
+async def create_briefing(
+    request: BriefingRequest,
+    db: Session = Depends(get_db),
+) -> BriefingAcceptedResponse:
     """Accept a briefing request and process it asynchronously."""
-    request_id = await briefing_service.create_briefing(request)
-    return BriefingAcceptedResponse(request_id=request_id, status="accepted")
+    briefing_id = await briefing_service.create_briefing(db, request)
+    return BriefingAcceptedResponse(id=briefing_id, status="accepted")
 
 
-@router.get("/{request_id}", response_model=BriefingStatusResponse)
-async def get_briefing(request_id: str) -> BriefingStatusResponse:
-    """Poll the status of an accepted briefing request."""
-    return briefing_service.get_briefing_status(request_id)
+@router.get("", response_model=BriefingListResponse)
+async def list_briefings(db: Session = Depends(get_db)) -> BriefingListResponse:
+    """Return all saved briefings, newest first."""
+    return briefing_service.list_briefings(db)
+
+
+@router.get("/{briefing_id}", response_model=BriefingStatusResponse)
+async def get_briefing(
+    briefing_id: UUID,
+    db: Session = Depends(get_db),
+) -> BriefingStatusResponse:
+    """Fetch a briefing by id (also used for status polling)."""
+    return briefing_service.get_briefing(db, briefing_id)

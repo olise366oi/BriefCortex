@@ -32,7 +32,7 @@ Given `{company, meeting_purpose}`, BriefCortex produces a structured `BriefingR
 
 <!-- ARCH_DIAGRAM -->
 
-*(Architecture diagram: see pitch deck. Also see `ARCHITECTURE.md`.)*
+*(Architecture diagram: see pitch deck. Also see `docs/ARCHITECTURE.md`.)*
 
 ### 1. Bifrost Time-Slicing
 
@@ -81,14 +81,14 @@ BriefCortex/
 ├── backend/                  # FastAPI service
 │   ├── app/
 │   │   ├── api/              # Route handlers
-│   │   ├── core/             # Settings
+│   │   ├── core/             # Settings + DB engine
+│   │   ├── db/               # SQLAlchemy ORM models
+│   │   ├── repositories/     # Data access (Postgres)
 │   │   ├── models/           # Pydantic request/response schemas
 │   │   ├── services/         # Ingestion, analysis, conflict detection, briefing orchestration
 │   │   └── mock/             # Demo briefing payload
 │   └── tests/
-├── ARCHITECTURE.md
-├── CLAUDE.md
-└── KARPATHY.md
+└── docs/                     # ARCHITECTURE, CLAUDE, KARPATHY
 ```
 
 ---
@@ -98,6 +98,9 @@ BriefCortex/
 ### Backend
 
 ```bash
+# optional: local Postgres
+docker compose up -d db
+
 cd backend
 python -m venv .venv
 # Windows: .venv\Scripts\activate
@@ -120,8 +123,9 @@ Open [http://localhost:3000](http://localhost:3000) — the app redirects to `/b
 
 ### API contract
 
-- `POST /api/briefings` — accepts `{ company_name, meeting_time, meeting_purpose }`, returns `202` with `{ request_id }`
-- `GET /api/briefings/{request_id}` — poll until `status` is `completed` or `failed`
+- `POST /api/briefings` — accepts `{ company_name, meeting_time, meeting_purpose }`, returns `202` with `{ id }`
+- `GET /api/briefings` — list saved briefings (newest first)
+- `GET /api/briefings/{id}` — fetch/poll a briefing by id until `status` is `completed` or `failed`
 
 ---
 
@@ -150,6 +154,6 @@ Two constraints are enforced in code, not just in prose:
 ## Contributing
 
 1. Branch from `main` with a `feature/`, `fix/`, or `chore/` prefix.
-2. Follow conventions in `CLAUDE.md` and the coding behavior contract in `KARPATHY.md`.
+2. Follow conventions in `docs/CLAUDE.md` and the coding behavior contract in `docs/KARPATHY.md`.
 3. Keep route handlers thin; put business logic in services.
 4. Open a PR with a clear summary and test notes.

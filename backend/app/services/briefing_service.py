@@ -3,41 +3,25 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
 
 from fastapi import HTTPException, status
+from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.core.database import SessionLocal
+from app.db.models import BriefingRecord
 from app.models.briefing import (
     BriefingJobStatus,
+    BriefingListItem,
+    BriefingListResponse,
     BriefingReport,
     BriefingRequest,
     BriefingStatusResponse,
 )
+from app.repositories.briefing_repository import BriefingRepository
 
 MOCK_REPORT_PATH = Path(__file__).resolve().parents[1] / "mock" / "nio_briefing_report.json"
-
-
-@dataclass
-class BriefingJob:
-    request_id: str
-    company_name: str
-    meeting_time: datetime
-    meeting_purpose: str
-    status: BriefingJobStatus = BriefingJobStatus.PENDING
-    report: Optional[BriefingReport] = None
-    error: Optional[str] = None
-
-
-@dataclass
-class BriefingStore:
-    jobs: Dict[str, BriefingJob] = field(default_factory=dict)
-
-
-_store = BriefingStore()
 
 
 def _load_mock_report() -> BriefingReport:
@@ -45,54 +29,90 @@ def _load_mock_report() -> BriefingReport:
     return BriefingReport.model_validate(payload)
 
 
-async def _process_job(request_id: str, settings: Settings) -> None:
-    job = _store.jobs.get(request_id)
-    if job is None:
-        return
+def _to_status_response(record: BriefingRecord) -> BriefingStatusResponse:
+    report = None
+    if record.report is not None:
+        report = BriefingReport.model_validate(record.report)
 
-    job.status = BriefingJobStatus.PROCESSING
+    return BriefingStatusResponse(
+        id=record.id,
+        status=BriefingJobStatus(record.status),
+        company_name=record.company_name,
+        meeting_time=record.meeting_time,
+        meeting_purpose=record.meeting_purpose,
+        report=report,
+        error=record.error,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
 
+
+def _to_list_item(record: BriefingRecord) -> BriefingListItem:
+    return BriefingListItem(
+        id=record.id,
+        company_name=record.company_name,
+        meeting_time=record.meeting_time,
+        meeting_purpose=record.meeting_purpose,
+        status=BriefingJobStatus(record.status),
+        created_at=record.created_at,
+    )
+
+
+async def _process_job(briefing_id: uuid.UUID, settings: Settings) -> None:
+    db = SessionLocal()
     try:
+        repo = BriefingRepository(db)
+        repo.update(briefing_id, status=BriefingJobStatus.PROCESSING.value)
+
         await asyncio.sleep(settings.MOCK_PROCESSING_DELAY_SECONDS)
+
         if not settings.MOCK_DATA:
             raise RuntimeError("Live briefing pipeline is not wired yet")
 
-        job.report = _load_mock_report()
-        job.status = BriefingJobStatus.COMPLETED
+        report = _load_mock_report()
+        repo.update(
+            briefing_id,
+            status=BriefingJobStatus.COMPLETED.value,
+            report=report.model_dump(mode="json"),
+        )
     except Exception as exc:
-        job.status = BriefingJobStatus.FAILED
-        job.error = str(exc)
+        repo = BriefingRepository(db)
+        repo.update(
+            briefing_id,
+            status=BriefingJobStatus.FAILED.value,
+            error=str(exc),
+        )
+    finally:
+        db.close()
 
 
-async def create_briefing(request: BriefingRequest) -> str:
+async def create_briefing(db: Session, request: BriefingRequest) -> uuid.UUID:
     settings = get_settings()
-    request_id = str(uuid.uuid4())
+    repo = BriefingRepository(db)
 
-    _store.jobs[request_id] = BriefingJob(
-        request_id=request_id,
+    record = repo.create(
         company_name=request.company_name.strip(),
         meeting_time=request.meeting_time,
         meeting_purpose=request.meeting_purpose.strip(),
+        status=BriefingJobStatus.PENDING.value,
     )
 
-    asyncio.create_task(_process_job(request_id, settings))
-    return request_id
+    asyncio.create_task(_process_job(record.id, settings))
+    return record.id
 
 
-def get_briefing_status(request_id: str) -> BriefingStatusResponse:
-    job = _store.jobs.get(request_id)
-    if job is None:
+def list_briefings(db: Session) -> BriefingListResponse:
+    repo = BriefingRepository(db)
+    records = repo.list_all()
+    return BriefingListResponse(items=[_to_list_item(record) for record in records])
+
+
+def get_briefing(db: Session, briefing_id: uuid.UUID) -> BriefingStatusResponse:
+    repo = BriefingRepository(db)
+    record = repo.get_by_id(briefing_id)
+    if record is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Briefing request '{request_id}' not found",
+            detail=f"Briefing '{briefing_id}' not found",
         )
-
-    return BriefingStatusResponse(
-        request_id=job.request_id,
-        status=job.status,
-        company_name=job.company_name,
-        meeting_time=job.meeting_time,
-        meeting_purpose=job.meeting_purpose,
-        report=job.report,
-        error=job.error,
-    )
+    return _to_status_response(record)

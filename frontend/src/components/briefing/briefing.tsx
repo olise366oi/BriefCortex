@@ -5,9 +5,9 @@ import { useBriefing } from "@/hooks";
 import { BriefingEmpty } from "./briefing-empty";
 import { BriefingError } from "./briefing-error";
 import { BriefingForm } from "./briefing-form";
-import { BriefingHeader } from "./briefing-header";
 import { BriefingLoading } from "./briefing-loading";
 import { BriefingReportView } from "./briefing-report";
+import { BriefingsSidePanel } from "./briefings-side-panel";
 
 export function Briefing() {
   const {
@@ -16,10 +16,15 @@ export function Briefing() {
     uiState,
     status,
     errorMessage,
+    briefings,
+    activeId,
     isLoading,
     updateField,
     handleSubmit,
     retry,
+    selectBriefing,
+    startNewMeeting,
+    cloneBriefing,
   } = useBriefing();
 
   return (
@@ -27,10 +32,18 @@ export function Briefing() {
       <div className="blob-bg-1" />
       <div className="blob-bg-2" />
 
-      <main className="relative z-10 w-full max-w-[1376px] flex flex-col gap-8">
-        <BriefingHeader />
+      <main className="relative z-10 w-full max-w-[1400px] flex gap-6 items-stretch">
+        <BriefingsSidePanel
+          items={briefings}
+          activeId={activeId}
+          onSelect={(id) => {
+            void selectBriefing(id);
+          }}
+          onNewMeeting={startNewMeeting}
+          onClone={cloneBriefing}
+        />
 
-        <div className="grid grid-cols-12 gap-7 items-start">
+        <div className="flex-1 min-w-0 grid grid-cols-12 gap-7 items-start">
           <BriefingForm
             form={form}
             errors={errors}

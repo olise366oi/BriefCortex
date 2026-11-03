@@ -3,6 +3,8 @@ export type {
   BriefingFormErrors,
   BriefingFormValues,
   BriefingJobStatus,
+  BriefingListItem,
+  BriefingListResponse,
   BriefingReport,
   BriefingRequest,
   BriefingStatusResponse,

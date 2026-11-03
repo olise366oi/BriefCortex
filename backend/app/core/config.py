@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "BriefCortex API"
     DEBUG: bool = True
     ALLOWED_ORIGINS: List[str] = ["http://localhost:3000"]
+    DATABASE_URL: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/briefcortex"
 
     # MOCK_DATA=TRUE
     MOCK_DATA: bool = True

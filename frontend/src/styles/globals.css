@@ -190,6 +190,121 @@ body {
   .clay-pulse {
     animation: clayPulse 1.8s ease-in-out infinite;
   }
+
+  .clay-rail {
+    background: #ffffff;
+    border-radius: 28px;
+    box-shadow:
+      10px 14px 26px rgba(116, 95, 185, 0.15),
+      -8px -8px 20px rgba(255, 255, 255, 0.95),
+      inset 2px 2px 4px rgba(255, 255, 255, 0.9),
+      inset -3px -3px 6px rgba(162, 145, 218, 0.1);
+  }
+
+  .clay-avatar-active {
+    background: #7c5cff;
+    color: #ffffff;
+    border-radius: 9999px;
+    box-shadow:
+      inset 3px 3px 6px rgba(45, 20, 140, 0.4),
+      inset -2px -2px 4px rgba(255, 255, 255, 0.4),
+      2px 3px 6px rgba(124, 92, 255, 0.25);
+  }
+
+  .clay-avatar-pastel {
+    background: #f0eafe;
+    color: #2b2350;
+    border-radius: 9999px;
+    box-shadow:
+      3px 4px 8px rgba(116, 95, 185, 0.1),
+      -2px -2px 5px rgba(255, 255, 255, 0.9),
+      inset 1px 1px 2px rgba(255, 255, 255, 0.8),
+      inset -1px -1px 2px rgba(150, 133, 204, 0.12);
+  }
+
+  .clay-floating-panel {
+    background: #ffffff;
+    border-radius: 28px;
+    box-shadow:
+      18px 24px 40px rgba(116, 95, 185, 0.26),
+      -10px -10px 24px rgba(255, 255, 255, 0.95),
+      inset 2px 2px 5px rgba(255, 255, 255, 0.9),
+      inset -3px -3px 6px rgba(162, 145, 218, 0.12);
+  }
+
+  .clay-row-normal {
+    background: #ffffff;
+    border-radius: 9999px;
+    box-shadow:
+      3px 4px 8px rgba(116, 95, 185, 0.08),
+      -2px -2px 6px rgba(255, 255, 255, 0.9),
+      inset 1px 1px 2px rgba(255, 255, 255, 0.9),
+      inset -1px -1px 2px rgba(162, 145, 218, 0.1);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+
+  .clay-row-normal:hover {
+    transform: translateY(-2px);
+    box-shadow:
+      5px 8px 16px rgba(124, 92, 255, 0.2),
+      -3px -3px 8px rgba(255, 255, 255, 0.95),
+      inset 1px 1px 3px rgba(255, 255, 255, 0.9),
+      inset -1px -1px 3px rgba(124, 92, 255, 0.15);
+  }
+
+  .clay-row-active {
+    background: #ede8ff;
+    border-radius: 9999px;
+    box-shadow:
+      inset 2.5px 2.5px 5px rgba(124, 92, 255, 0.22),
+      inset -2px -2px 4px rgba(255, 255, 255, 0.85);
+  }
+
+  .clay-row-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 9999px;
+    background: #ffffff;
+    box-shadow:
+      2px 2px 4px rgba(116, 95, 185, 0.12),
+      -1.5px -1.5px 3px rgba(255, 255, 255, 0.9);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #2b2350;
+    font-size: 13px;
+    font-weight: bold;
+  }
+
+  .clay-row-btn-sunk {
+    width: 28px;
+    height: 28px;
+    border-radius: 9999px;
+    background: #ede8ff;
+    box-shadow:
+      inset 2px 2px 4px rgba(124, 92, 255, 0.28),
+      inset -1.5px -1.5px 3px rgba(255, 255, 255, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #7c5cff;
+    font-size: 13px;
+    font-weight: bold;
+  }
+
+  .clay-popover {
+    background: #ffffff;
+    border-radius: 18px;
+    box-shadow:
+      10px 14px 28px rgba(116, 95, 185, 0.22),
+      -6px -6px 14px rgba(255, 255, 255, 0.95),
+      inset 2px 2px 4px rgba(255, 255, 255, 0.9);
+  }
+
+  .mask-fade-right {
+    mask-image: linear-gradient(to right, black 75%, transparent 98%);
+    -webkit-mask-image: linear-gradient(to right, black 75%, transparent 98%);
+  }
 }
 
 @keyframes clayPulse {

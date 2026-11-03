@@ -3,8 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 from typing import List, Optional
+from uuid import UUID
 
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl
 
 
 class BriefingRequest(BaseModel):
@@ -16,7 +17,7 @@ class BriefingRequest(BaseModel):
 
 
 class BriefingAcceptedResponse(BaseModel):
-    request_id: str
+    id: UUID
     status: str = "accepted"
 
 
@@ -68,10 +69,25 @@ class BriefingReport(BaseModel):
 
 
 class BriefingStatusResponse(BaseModel):
-    request_id: str
+    id: UUID
     status: BriefingJobStatus
     company_name: str
     meeting_time: datetime
     meeting_purpose: str
     report: Optional[BriefingReport] = None
     error: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class BriefingListItem(BaseModel):
+    id: UUID
+    company_name: str
+    meeting_time: datetime
+    meeting_purpose: str
+    status: BriefingJobStatus
+    created_at: datetime
+
+
+class BriefingListResponse(BaseModel):
+    items: List[BriefingListItem] = Field(default_factory=list)

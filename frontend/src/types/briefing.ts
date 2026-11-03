@@ -5,7 +5,7 @@ export interface BriefingRequest {
 }
 
 export interface BriefingAcceptedResponse {
-  request_id: string;
+  id: string;
   status: string;
 }
 
@@ -40,13 +40,28 @@ export interface BriefingReport {
 }
 
 export interface BriefingStatusResponse {
-  request_id: string;
+  id: string;
   status: BriefingJobStatus;
   company_name: string;
   meeting_time: string;
   meeting_purpose: string;
   report: BriefingReport | null;
   error: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface BriefingListItem {
+  id: string;
+  company_name: string;
+  meeting_time: string;
+  meeting_purpose: string;
+  status: BriefingJobStatus;
+  created_at: string;
+}
+
+export interface BriefingListResponse {
+  items: BriefingListItem[];
 }
 
 export type BriefingUiState = "empty" | "loading" | "ready" | "error";

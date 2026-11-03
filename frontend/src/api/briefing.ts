@@ -1,6 +1,7 @@
 import { axiosOpen } from "@/api/axios";
 import type {
   BriefingAcceptedResponse,
+  BriefingListResponse,
   BriefingRequest,
   BriefingStatusResponse,
 } from "@/types";
@@ -15,11 +16,16 @@ export async function createBriefing(
   return response.data;
 }
 
-export async function getBriefingStatus(
-  requestId: string
+export async function listBriefings(): Promise<BriefingListResponse> {
+  const response = await axiosOpen.get<BriefingListResponse>("/briefings");
+  return response.data;
+}
+
+export async function getBriefing(
+  briefingId: string
 ): Promise<BriefingStatusResponse> {
   const response = await axiosOpen.get<BriefingStatusResponse>(
-    `/briefings/${requestId}`
+    `/briefings/${briefingId}`
   );
   return response.data;
 }

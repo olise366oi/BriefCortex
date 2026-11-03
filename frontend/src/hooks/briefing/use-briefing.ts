@@ -2,12 +2,17 @@
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
-import { createBriefing, getBriefingStatus } from "@/api";
+import { createBriefing, getBriefing, listBriefings } from "@/api";
 import { POLL_INTERVAL_MS, POLL_TIMEOUT_MS } from "@/constants";
-import { toDatetimeLocalValue, toIsoMeetingTime } from "@/lib";
+import {
+  isoToDatetimeLocalValue,
+  toDatetimeLocalValue,
+  toIsoMeetingTime,
+} from "@/lib";
 import type {
   BriefingFormErrors,
   BriefingFormValues,
+  BriefingListItem,
   BriefingStatusResponse,
   BriefingUiState,
 } from "@/types";
@@ -34,12 +39,33 @@ function validateForm(values: BriefingFormValues): BriefingFormErrors {
   return errors;
 }
 
+function applyStatusToUi(next: BriefingStatusResponse): {
+  uiState: BriefingUiState;
+  errorMessage: string | null;
+} {
+  if (next.status === "completed" && next.report) {
+    return { uiState: "ready", errorMessage: null };
+  }
+  if (next.status === "failed") {
+    return {
+      uiState: "error",
+      errorMessage: next.error || "Couldn't generate the brief.",
+    };
+  }
+  if (next.status === "pending" || next.status === "processing") {
+    return { uiState: "loading", errorMessage: null };
+  }
+  return { uiState: "empty", errorMessage: null };
+}
+
 export function useBriefing() {
   const [form, setForm] = useState<BriefingFormValues>(EMPTY_FORM);
   const [errors, setErrors] = useState<BriefingFormErrors>({});
   const [uiState, setUiState] = useState<BriefingUiState>("empty");
   const [status, setStatus] = useState<BriefingStatusResponse | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [briefings, setBriefings] = useState<BriefingListItem[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
 
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef(false);
@@ -51,6 +77,19 @@ export function useBriefing() {
     }
   }, []);
 
+  const refreshBriefings = useCallback(async () => {
+    try {
+      const response = await listBriefings();
+      setBriefings(response.items);
+    } catch {
+      // Keep existing list if refresh fails.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshBriefings();
+  }, [refreshBriefings]);
+
   useEffect(() => {
     return () => {
       abortRef.current = true;
@@ -59,18 +98,20 @@ export function useBriefing() {
   }, [clearPoll]);
 
   const pollStatus = useCallback(
-    async (requestId: string, startedAt: number) => {
+    async (briefingId: string, startedAt: number) => {
       if (abortRef.current) return;
 
       try {
-        const next = await getBriefingStatus(requestId);
+        const next = await getBriefing(briefingId);
         if (abortRef.current) return;
 
         setStatus(next);
+        setActiveId(next.id);
 
         if (next.status === "completed" && next.report) {
           setUiState("ready");
           clearPoll();
+          void refreshBriefings();
           return;
         }
 
@@ -78,6 +119,7 @@ export function useBriefing() {
           setUiState("error");
           setErrorMessage(next.error || "Couldn't generate the brief.");
           clearPoll();
+          void refreshBriefings();
           return;
         }
 
@@ -89,7 +131,7 @@ export function useBriefing() {
         }
 
         pollTimerRef.current = setTimeout(() => {
-          void pollStatus(requestId, startedAt);
+          void pollStatus(briefingId, startedAt);
         }, POLL_INTERVAL_MS);
       } catch {
         if (abortRef.current) return;
@@ -97,6 +139,76 @@ export function useBriefing() {
         setErrorMessage("Couldn't generate the brief.");
         clearPoll();
       }
+    },
+    [clearPoll, refreshBriefings]
+  );
+
+  const startNewMeeting = useCallback(() => {
+    abortRef.current = true;
+    clearPoll();
+    abortRef.current = false;
+    setActiveId(null);
+    setStatus(null);
+    setForm({
+      companyName: "",
+      meetingTime: toDatetimeLocalValue(),
+      meetingPurpose: "",
+    });
+    setErrors({});
+    setErrorMessage(null);
+    setUiState("empty");
+  }, [clearPoll]);
+
+  const selectBriefing = useCallback(
+    async (briefingId: string) => {
+      abortRef.current = false;
+      clearPoll();
+      setActiveId(briefingId);
+      setErrors({});
+      setErrorMessage(null);
+      setUiState("loading");
+
+      try {
+        const next = await getBriefing(briefingId);
+        if (abortRef.current) return;
+
+        setStatus(next);
+        setForm({
+          companyName: next.company_name,
+          meetingTime: isoToDatetimeLocalValue(next.meeting_time),
+          meetingPurpose: next.meeting_purpose,
+        });
+
+        const mapped = applyStatusToUi(next);
+        setUiState(mapped.uiState);
+        setErrorMessage(mapped.errorMessage);
+
+        if (next.status === "pending" || next.status === "processing") {
+          await pollStatus(briefingId, Date.now());
+        }
+      } catch {
+        setUiState("error");
+        setErrorMessage("Couldn't load the brief.");
+      }
+    },
+    [clearPoll, pollStatus]
+  );
+
+  const cloneBriefing = useCallback(
+    (item: BriefingListItem) => {
+      abortRef.current = true;
+      clearPoll();
+      abortRef.current = false;
+      setActiveId(null);
+      setStatus(null);
+      setForm({
+        companyName: item.company_name,
+        meetingTime: isoToDatetimeLocalValue(item.meeting_time),
+        meetingPurpose: item.meeting_purpose,
+      });
+      setErrors({});
+      setErrorMessage(null);
+      setUiState("empty");
     },
     [clearPoll]
   );
@@ -113,6 +225,7 @@ export function useBriefing() {
     setUiState("loading");
     setErrorMessage(null);
     setStatus(null);
+    setActiveId(null);
 
     try {
       const accepted = await createBriefing({
@@ -121,12 +234,14 @@ export function useBriefing() {
         meeting_purpose: form.meetingPurpose.trim(),
       });
 
-      await pollStatus(accepted.request_id, Date.now());
+      setActiveId(accepted.id);
+      await refreshBriefings();
+      await pollStatus(accepted.id, Date.now());
     } catch {
       setUiState("error");
       setErrorMessage("Couldn't generate the brief.");
     }
-  }, [clearPoll, form, pollStatus]);
+  }, [clearPoll, form, pollStatus, refreshBriefings]);
 
   const handleSubmit = useCallback(
     (event: FormEvent<HTMLFormElement>) => {
@@ -154,9 +269,14 @@ export function useBriefing() {
     uiState,
     status,
     errorMessage,
+    briefings,
+    activeId,
     isLoading: uiState === "loading",
     updateField,
     handleSubmit,
     retry,
+    selectBriefing,
+    startNewMeeting,
+    cloneBriefing,
   };
 }
