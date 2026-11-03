@@ -2,8 +2,17 @@
 from __future__ import annotations
 
 import os
+import sys
 from typing import List, Tuple
 
+# Add the plugin directory to sys.path to import the middleware
+sys.path.append(
+    os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "bifrost-time-aware-plugin")
+    )
+)
+
+from middleware import generate_bifrost_headers
 from openai import AsyncOpenAI
 from pydantic import BaseModel, HttpUrl, ValidationError
 
@@ -107,10 +116,22 @@ def _build_client() -> Tuple[AsyncOpenAI, str]:
 SYSTEM_PROMPT = """You are a ruthless, highly aggressive Wall Street M&A and negotiation strategist. You brief the deal team before a high-stakes commercial meeting. No pleasantries, no hedging, no generic consulting language. Turn the meeting purpose and available evidence into cold, specific negotiation leverage and concrete asks.
 
 INPUTS (exactly these three blocks, no others):
-<MEETING_PURPOSE> the commercial objective of the meeting.
+<MEETING_PURPOSE> the commercial objective of the meeting. It may be "(none supplied)".
 <HARD_FACTS> verified factual evidence. This is the ONLY source of negotiation leverage.
 <ANALYST_OPINIONS> unverified analyst commentary and rumors. Treat as leads to verify, never as facts.
 The output fields news/hires/launches/open_questions/risks must be produced by classifying and summarizing ANALYST_OPINIONS and HARD_FACTS. Do not assume any input block named NEWS, HIRES, LAUNCHES, OPEN_QUESTIONS, or RISKS exists.
+
+TWO MODES — read the MODE line in the user message and follow exactly one:
+
+MODE negotiation (a real <MEETING_PURPOSE> is supplied):
+- Follow CORE BEHAVIOR and ANTI-HALLUCINATION BOTTOM LINE below.
+
+MODE fundamentals (the purpose block says "(none supplied)"):
+- There is no deal to negotiate. Do NOT invent an objective and do NOT emit numeric asks, price demands, payment-term demands or concessions.
+- Populate the modules with recent business facts: news = reported developments, launches = new products, capacity or market moves, hires = leadership and staffing changes, risks = signals of deterioration, open_questions = what the evidence does not settle.
+- executive_summary.recommendation becomes a short directional read on the company, not a demand list. Write 2 to 4 sentences separated by semicolons stating the business direction, what is demonstrably working, and what deserves caution. Every statement must trace to <HARD_FACTS> (or be marked [UNVERIFIED]).
+- executive_summary.confidence must state what the evidence supports and what it does not.
+- The ANTI-HALLUCINATION BOTTOM LINE fallback sentence does NOT apply in this mode; it applies only when a real objective exists but the evidence cannot support an aggressive ask.
 
 CORE BEHAVIOR:
 1. Align every recommendation to <MEETING_PURPOSE>.
@@ -163,8 +184,24 @@ def _format_fact_base_for_prompt(fact_base: FactBase) -> str:
 
 def _build_user_message(fact_base: FactBase, meeting_purpose: str) -> str:
     fact_block = _format_fact_base_for_prompt(fact_base)
+    purpose_text = meeting_purpose.strip()
+
+    if purpose_text:
+        mode_block = (
+            f"<MEETING_PURPOSE>\n{purpose_text}\n</MEETING_PURPOSE>\n"
+            "MODE: negotiation. Use HARD_FACTS as leverage against that objective."
+        )
+    else:
+        mode_block = (
+            "<MEETING_PURPOSE>\n(none supplied)\n</MEETING_PURPOSE>\n"
+            "MODE: fundamentals. No commercial objective was supplied, so do not "
+            "invent one and do not manufacture negotiation asks. Report the "
+            "company's recent business direction, what is demonstrably working, "
+            "and what deserves caution."
+        )
+
     return (
-        f"<MEETING_PURPOSE>\n{meeting_purpose}\n</MEETING_PURPOSE>\n"
+        f"{mode_block}\n"
         f"{fact_block}\n\n"
         "Produce a BriefingReport JSON object following all rules in the system prompt."
     )
@@ -175,6 +212,9 @@ async def _call_llm_with_retry(
     model: str,
     user_message: str,
     max_retries: int,
+    company_id: str,
+    meeting_purpose: str,
+    fact_base_dict: dict,
 ) -> BriefingReport:
     """Call the LLM and enforce BriefingReport schema with retries.
 
@@ -187,6 +227,10 @@ async def _call_llm_with_retry(
     ]
 
     last_error: Exception = RuntimeError("no attempt executed")
+
+    # Generate headers for Bifrost caching
+    bifrost_headers = generate_bifrost_headers(company_id, meeting_purpose, fact_base_dict)
+    logger.info("Bifrost headers | %s", bifrost_headers)
 
     for attempt in range(1, max_retries + 1):
         content = ""
@@ -202,6 +246,7 @@ async def _call_llm_with_retry(
                 messages=messages,
                 response_format={"type": "json_object"},
                 temperature=0.2,
+                extra_headers=bifrost_headers,
             )
             content = response.choices[0].message.content or ""
             if not content:
@@ -271,17 +316,26 @@ async def generate_briefing_report(
     Raises BriefingGenerationError if the LLM fails after max_retries.
     """
     logger.info(
-        "Analysis started | company_id=%s | purpose=%r | hard_facts=%s | "
+        "Analysis started | company_id=%s | purpose=%r | mode=%s | hard_facts=%s | "
         "analyst_opinions=%s | conflicts=%s",
         fact_base.company_id,
         meeting_purpose,
+        "negotiation" if meeting_purpose.strip() else "fundamentals",
         len(fact_base.hard_facts),
         len(fact_base.analyst_opinions),
         len(fact_base.conflicts),
     )
     client, model = _build_client()
     user_message = _build_user_message(fact_base, meeting_purpose)
-    report = await _call_llm_with_retry(client, model, user_message, max_retries)
+    report = await _call_llm_with_retry(
+        client,
+        model,
+        user_message,
+        max_retries,
+        fact_base.company_id,
+        meeting_purpose,
+        fact_base.model_dump(),
+    )
     logger.info(
         "Analysis complete | company_id=%s | recommendation_chars=%s",
         fact_base.company_id,
