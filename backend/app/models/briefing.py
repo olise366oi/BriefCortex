@@ -81,6 +81,9 @@ class EvidenceItem(BaseModel):
     content: str
     source_url: str
     publish_date: Optional[datetime] = None
+    # Other outlets that reported this same fact. The claim is stored once, but
+    # every place it appeared stays available to the reader.
+    also_reported_by: List[str] = Field(default_factory=list)
 
 
 class IncidentalItem(BaseModel):
@@ -106,6 +109,9 @@ class EvidenceSummary(BaseModel):
     opinion_count: int = 0
     conflict_count: int = 0
     conflicts: List[EvidenceConflict] = Field(default_factory=list)
+    # The facts behind the brief. Each is stored once however many outlets
+    # reported it, with the other outlets listed beside it.
+    hard_facts: List[EvidenceItem] = Field(default_factory=list)
     analyst_opinions: List[EvidenceItem] = Field(default_factory=list)
     incidental_facts: List[IncidentalItem] = Field(default_factory=list)
 

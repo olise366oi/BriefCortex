@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from app.services.llm_client import build_client
 from app.services.logger_service import get_logger
+from app.models.fact_base import FactItem
 
 logger = get_logger("dedup")
 
@@ -53,15 +54,56 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", lowered).strip()
 
 
+# Coverage only counts when the shorter sentence is substantial enough that a
+# partial match is meaningful. Below this, a single shared word can dominate.
+MIN_COVERAGE_CHARS = 40
+
+
+def coverage(shorter: str, longer: str) -> float:
+    """Return how much of the shorter sentence appears inside the longer one.
+
+    ``SequenceMatcher.ratio`` compares both directions, so a short sentence and
+    the same sentence with an added clause score low even though one is plainly
+    a telling of the other (measured: 0.559 for a base sentence versus its own
+    extended version). Coverage asks the question the dedup step actually cares
+    about: is this the same sentence, told with more detail?
+
+    Very short sentences are excluded, because one shared word would otherwise
+    read as high coverage.
+    """
+    a = normalize(shorter)
+    b = normalize(longer)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+
+    if min(len(a), len(b)) < MIN_COVERAGE_CHARS:
+        return 0.0
+
+    # Two sentences with different lengths: match the shorter against the longer.
+    if len(a) > len(b):
+        a, b = b, a
+
+    matcher = SequenceMatcher(None, a, b)
+    matched = sum(block.size for block in matcher.get_matching_blocks())
+    return matched / len(a)
+
+
 def similarity(left: str, right: str) -> float:
-    """Return a 0..1 lexical similarity between two sentences."""
+    """Return a 0..1 measure of whether these two sentences tell the same thing.
+
+    The larger of a two-way edit distance and a one-way coverage score: the edit
+    distance catches paraphrases of the same length, and coverage catches a
+    fuller telling of the same sentence.
+    """
     a = normalize(left)
     b = normalize(right)
     if not a or not b:
         return 0.0
     if a == b:
         return 1.0
-    return SequenceMatcher(None, a, b).ratio()
+    return max(SequenceMatcher(None, a, b).ratio(), coverage(left, right))
 
 
 @dataclass(frozen=True)
@@ -160,26 +202,119 @@ async def confirm_same_facts(
     return confirmed
 
 
+async def merge_duplicate_facts(
+    facts: Sequence[FactItem],
+) -> tuple[List[FactItem], dict]:
+    """Collapse facts that say the same thing into one, keeping every source.
+
+    A fact is worth keeping once, no matter how many outlets carried it: the
+    claim is the value, not the coverage count. When two entries are the same
+    fact, the fuller telling wins because it carries more of the detail, and the
+    shorter entry's source moves into the winner's ``also_reported_by`` list so
+    the reader still has every link.
+
+    Returns the merged list and counters describing what happened.
+    """
+    stats = {"considered": len(facts), "merged": 0, "kept": 0}
+    if len(facts) < 2:
+        return list(facts), stats
+
+    merged: List[FactItem] = []
+    claimed: set[int] = set()
+
+    for index, fact in enumerate(facts):
+        if index in claimed:
+            continue
+
+        group = [fact]
+        candidates = [
+            (other_index, other)
+            for other_index, other in enumerate(facts)
+            if other_index != index and other_index not in claimed
+        ]
+        if not candidates:
+            merged.append(fact)
+            stats["kept"] += 1
+            continue
+
+        # Compare against every member already in the group, not just the
+        # anchor: a third telling can be worded closer to the second one, and
+        # pairing only against the anchor would silently leave it unmerged.
+        remaining = list(candidates)
+        while remaining:
+            existing_texts = [item.content for item in group]
+            incoming_texts = [other.content for _i, other in remaining]
+
+            pairs = find_candidates(existing_texts, incoming_texts)
+            if not pairs:
+                break
+
+            confirmed = await confirm_same_facts(existing_texts, incoming_texts, pairs)
+            if not confirmed:
+                break
+
+            advanced = False
+            for pair in confirmed:
+                other_index, other = remaining[pair.incoming_index]
+                if other_index in claimed or other in group:
+                    continue
+                claimed.add(other_index)
+                group.append(other)
+                advanced = True
+
+            if not advanced:
+                break
+            remaining = [
+                entry for entry in remaining if entry[0] not in claimed
+            ]
+
+        if len(group) == 1:
+            merged.append(fact)
+            stats["kept"] += 1
+            continue
+
+        winner = max(group, key=lambda item: len(item.content))
+        sources: List[str] = []
+        for item in group:
+            for url in item.all_sources():
+                if url not in sources:
+                    sources.append(url)
+
+        primary = str(winner.source_url)
+        winner.also_reported_by = [url for url in sources if url != primary]
+        merged.append(winner)
+        stats["merged"] += len(group) - 1
+
+    logger.info(
+        "Fact merge | considered=%s | merged=%s | kept=%s",
+        stats["considered"],
+        stats["merged"],
+        stats["kept"],
+    )
+    return merged, stats
+
+
 async def drop_duplicate_facts(
     existing: Sequence[str],
     incoming: Sequence[str],
 ) -> List[int]:
     """Return the indices of incoming sentences that repeat an existing fact.
 
-    Runs in two stages: a lexical score proposes the pairs that could plausibly
-    be the same, then the model confirms which of them actually are. A sentence
-    is dropped only when the model agrees.
+    Used to check incidental mentions against the fact base: a one-line mention
+    that says the same thing as a stored fact adds nothing, so it is dropped.
+    Runs in two stages — a lexical score proposes pairs, the model confirms
+    which are actually the same — and nothing is dropped without confirmation.
     """
     pairs = find_candidates(existing, incoming)
     if not pairs:
-        logger.info("Semantic dedup | no candidate pairs above threshold")
+        logger.info("Incidental dedup | no candidate pairs above threshold")
         return []
 
     confirmed = await confirm_same_facts(existing, incoming, pairs)
     dropped = sorted({pair.incoming_index for pair in confirmed})
 
     logger.info(
-        "Semantic dedup | candidates=%s | confirmed=%s | dropped=%s",
+        "Incidental dedup | candidates=%s | confirmed=%s | dropped=%s",
         len(pairs),
         len(confirmed),
         len(dropped),

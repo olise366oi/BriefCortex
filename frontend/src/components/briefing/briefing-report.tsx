@@ -1,6 +1,7 @@
 import { formatMeetingTime } from "@/lib";
-import type { BriefingReport as BriefingReportType } from "@/types";
+import type { BriefingReport as BriefingReportType, EvidenceSummary } from "@/types";
 
+import { EvidencePanel } from "./evidence-panel";
 import { SectionCard } from "./section-card";
 
 interface BriefingReportProps {
@@ -8,6 +9,7 @@ interface BriefingReportProps {
   meetingPurpose: string;
   meetingTime: string;
   report: BriefingReportType;
+  evidence?: EvidenceSummary | null;
 }
 
 function capitalizeConfidence(value: string): string {
@@ -20,6 +22,7 @@ export function BriefingReportView({
   meetingPurpose,
   meetingTime,
   report,
+  evidence,
 }: BriefingReportProps) {
   const { executive_summary: summary } = report;
 
@@ -114,6 +117,8 @@ export function BriefingReportView({
           }
         />
       </div>
+
+      {evidence ? <EvidencePanel evidence={evidence} /> : null}
     </div>
   );
 }

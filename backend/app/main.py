@@ -8,10 +8,13 @@ from app.core.config import ENV_FILE, get_settings
 from app.core.database import DatabaseUnavailableError, init_db
 from app.services import briefing_service
 from app.services.logger_service import configure_logging, get_logger
+from app.services.scheduler import RetentionScheduler
 
 settings = get_settings()
 configure_logging()
 logger = get_logger("main")
+
+retention_scheduler = RetentionScheduler()
 
 
 def _log_startup_configuration() -> None:
@@ -66,7 +69,9 @@ async def lifespan(_app: FastAPI):
         logger.error("%s", exc)
         raise
     await briefing_service.recover_stale_jobs()
+    retention_scheduler.start()
     yield
+    await retention_scheduler.stop()
     await briefing_service.wait_for_jobs()
 
 

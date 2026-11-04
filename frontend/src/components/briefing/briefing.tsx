@@ -64,6 +64,7 @@ export function Briefing() {
                 meetingPurpose={status.meeting_purpose}
                 meetingTime={status.meeting_time}
                 report={status.report}
+                evidence={status.evidence}
               />
             ) : null}
           </section>

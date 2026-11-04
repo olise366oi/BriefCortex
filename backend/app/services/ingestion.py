@@ -28,7 +28,7 @@ from app.services.freshness import (
 )
 from app.services.article_subject import classify_article_subjects
 from app.services.corroboration import corroborate_incidental_facts
-from app.services.dedup import drop_duplicate_facts
+from app.services.dedup import drop_duplicate_facts, merge_duplicate_facts
 from app.services.incidental import opening_sentence
 from app.services.incidental_harvest import harvest_incidental_facts
 from app.services.logger_service import get_logger
@@ -548,9 +548,23 @@ async def ingest_company_data(
             known_urls=known_urls,
         )
 
-    # Incidental facts were collected against the articles at hand. Now that the
-    # full fact base exists, any of them that repeats something already known is
-    # dropped: a short mention adds nothing once the fuller telling is in hand.
+    # Two stages, in the order the reader benefits from them.
+    #
+    # First the fact base itself is merged: the same fact reported by five
+    # outlets becomes one entry carrying all five links, and the fuller telling
+    # wins because it holds more of the detail.
+    if hard_facts:
+        hard_facts, merge_stats = await merge_duplicate_facts(hard_facts)
+        logger.info(
+            "Hard fact merge | before=%s | after=%s",
+            merge_stats["considered"],
+            len(hard_facts),
+        )
+
+    # Then incidental mentions are checked against the merged base: a one-line
+    # mention adds nothing once the fact itself is already stored with its
+    # sources, so it is dropped. A mention that says something the base does not
+    # is kept, because it is its own fact.
     if incidental and hard_facts:
         duplicate_indices = await drop_duplicate_facts(
             [item.content for item in hard_facts],

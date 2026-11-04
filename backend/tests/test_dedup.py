@@ -4,6 +4,7 @@ from __future__ import annotations
 from app.services.dedup import (
     CANDIDATE_SIMILARITY,
     CandidatePair,
+    coverage,
     find_candidates,
     similarity,
 )
@@ -48,6 +49,32 @@ def test_similar_wording_still_becomes_a_candidate():
 def test_candidates_respect_the_similarity_threshold():
     pairs = find_candidates(["NIO cut jobs."], ["The regulator fined a bank."])
     assert all(pair.similarity >= CANDIDATE_SIMILARITY for pair in pairs)
+
+
+def test_same_template_different_event_still_reaches_the_model():
+    # Character overlap cannot tell "cut 400 jobs in March" from "in June":
+    # they score above the threshold. That is why the model must confirm every
+    # pair — this test pins the reason the cheap filter is only a filter.
+    left = "The company cut 400 jobs in March across its European unit."
+    right = "The company cut 400 jobs in June across its European unit."
+
+    pairs = find_candidates([left], [right])
+
+    assert pairs, "lexically close pairs must reach the model"
+    assert pairs[0].similarity >= CANDIDATE_SIMILARITY
+
+
+def test_extended_telling_scores_as_coverage():
+    base = "NIO delivered 34,246 vehicles in October."
+    extended = (
+        "NIO delivered 34,246 vehicles in October 2026, comprising 18,125 "
+        "from the NIO brand and 16,121 from ONVO."
+    )
+
+    # The plain edit distance undersells this pair; coverage sees that the
+    # shorter telling sits entirely inside the longer one.
+    assert coverage(base, extended) >= CANDIDATE_SIMILARITY
+    assert similarity(base, extended) >= CANDIDATE_SIMILARITY
 
 
 def test_candidates_are_ordered_strongest_first():

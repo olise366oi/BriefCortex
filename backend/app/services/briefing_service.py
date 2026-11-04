@@ -174,11 +174,21 @@ def _build_evidence_summary(fact_base: FactBase) -> EvidenceSummary:
             )
             for conflict in fact_base.conflicts
         ],
+        hard_facts=[
+            EvidenceItem(
+                content=item.content,
+                source_url=str(item.source_url),
+                publish_date=item.publish_date,
+                also_reported_by=list(item.also_reported_by),
+            )
+            for item in fact_base.hard_facts
+        ],
         analyst_opinions=[
             EvidenceItem(
                 content=item.content,
                 source_url=str(item.source_url),
                 publish_date=item.publish_date,
+                also_reported_by=list(item.also_reported_by),
             )
             for item in fact_base.analyst_opinions
         ],

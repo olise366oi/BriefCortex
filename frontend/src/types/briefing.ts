@@ -52,6 +52,7 @@ export interface EvidenceItem {
   content: string;
   source_url: string;
   publish_date?: string | null;
+  also_reported_by: string[];
 }
 
 export interface IncidentalItem {
@@ -68,6 +69,7 @@ export interface EvidenceSummary {
   opinion_count: number;
   conflict_count: number;
   conflicts: EvidenceConflict[];
+  hard_facts: EvidenceItem[];
   analyst_opinions: EvidenceItem[];
   incidental_facts: IncidentalItem[];
 }

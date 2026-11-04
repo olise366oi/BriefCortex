@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl
 
 
 class FactItem(BaseModel):
@@ -11,11 +11,27 @@ class FactItem(BaseModel):
 
     The content field must be an excerpt from the source text or a short
     sentence tightly bound to the source text.
+
+    A fact is stored once, however many outlets reported it. Every outlet that
+    told it is kept in ``also_reported_by`` so a reader still gets all the
+    links: how much coverage a claim received is not the claim's value, but the
+    reader may still want every place it appeared.
     """
 
     content: str
     source_url: HttpUrl
     publish_date: Optional[datetime] = None
+    # Additional sources that reported the same fact, so the entry keeps one
+    # copy of the claim without losing the reader's other links.
+    also_reported_by: List[str] = Field(default_factory=list)
+
+    def all_sources(self) -> List[str]:
+        """Return every URL that reported this fact, primary source first."""
+        sources = [str(self.source_url)]
+        for url in self.also_reported_by:
+            if url and url not in sources:
+                sources.append(url)
+        return sources
 
 
 class IncidentalFact(BaseModel):
@@ -37,6 +53,12 @@ class IncidentalFact(BaseModel):
     provenance: str = "unverified"
     # The source found by the targeted follow-up search, when one exists.
     corroborating_url: Optional[str] = None
+
+    def all_sources(self) -> List[str]:
+        sources = [str(self.source_url)]
+        if self.corroborating_url and self.corroborating_url not in sources:
+            sources.append(self.corroborating_url)
+        return sources
 
 
 class FactBase(BaseModel):
