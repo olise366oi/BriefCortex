@@ -14,36 +14,11 @@ from app.services.source_rules import (
     SITE_BODY_RULES,
     SITE_SECTION_RULES,
 )
+from app.services.urls import host_of, url_path
 
 MIN_BODY_CHARS = 400
 
 BODY_HEADING_RE = re.compile(r"^#\s+\S")
-
-
-def url_path(url: str) -> str:
-    """Return the path portion of a URL, lowercased, without query or fragment."""
-    lowered = url.strip().lower()
-    for separator in ("?", "#"):
-        if separator in lowered:
-            lowered = lowered.split(separator, 1)[0]
-    if "//" in lowered:
-        lowered = lowered.split("//", 1)[1]
-    slash = lowered.find("/")
-    return lowered[slash:] if slash != -1 else "/"
-
-
-def host_of(url: str) -> str:
-    """Return the lowercased host, without www, query or fragment."""
-    host = url.strip().lower()
-    for separator in ("?", "#"):
-        if separator in host:
-            host = host.split(separator, 1)[0]
-    if "//" in host:
-        host = host.split("//", 1)[1]
-    host = host.split("/", 1)[0]
-    if host.startswith("www."):
-        host = host[len("www."):]
-    return host
 
 
 def _longest_domain_match(host: str, rules: dict):
@@ -225,7 +200,20 @@ def extract_clean_text(raw_content: Optional[str], url: str) -> Optional[str]:
         return None
 
     try:
-        clean_text = extract(html, output_format="markdown")
+        # Reader comments are never evidence, and the fact split cannot tell a
+        # comment from reporting once both are prose. Turning them off closes
+        # the case where the body boundary missed a comment block.
+        #
+        # favor_precision is deliberately NOT set: on publishers without a
+        # body-boundary rule it collapses the article to a single line
+        # (measured: 1466 chars -> 30 on an unlisted host). Comments off and
+        # deduplication are safe everywhere; precision is not.
+        clean_text = extract(
+            html,
+            output_format="markdown",
+            include_comments=False,
+            deduplicate=True,
+        )
     except Exception:
         return None
 

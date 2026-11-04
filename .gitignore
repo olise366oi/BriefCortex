@@ -11,3 +11,15 @@ node_modules/
 frontend/.next/
 frontend/out/
 *.log
+
+# Bifrost gateway runtime data: SQLite config and request logs, recreated on
+# start. Only config.json is source.
+bifrost/config.db
+bifrost/config.db-shm
+bifrost/config.db-wal
+bifrost/logs.db
+bifrost/logs.db-shm
+bifrost/logs.db-wal
+bifrost/logs/
+
+*.tsbuildinfo

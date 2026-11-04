@@ -3,12 +3,20 @@ from __future__ import annotations
 
 from typing import Tuple
 
-from openai import AsyncOpenAI
+from typing import Tuple
+
 from pydantic import ValidationError
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_random_exponential
 
 from app.core.config import get_settings
 from app.models.briefing import BriefingReport
 from app.services.bifrost_headers import build_bifrost_headers
+from app.services.llm_client import (
+    LLMUnavailableError,
+    build_client,
+    is_permanent_error,
+    is_retryable_error,
+)
 from app.services.logger_service import get_logger
 
 from .ingestion import FactBase
@@ -18,52 +26,6 @@ logger = get_logger("analysis")
 
 class BriefingGenerationError(Exception):
     """Raised when the LLM fails to produce a valid BriefingReport after retries."""
-
-
-def _build_client() -> Tuple[AsyncOpenAI, str]:
-    """Build an async OpenAI-compatible client from Settings.
-
-    Configuration priority:
-    1. Explicit: BRIEFING_API_KEY + optional BRIEFING_BASE_URL + BRIEFING_MODEL
-    2. Fallback to DEEPSEEK_API_KEY (base_url set to DeepSeek, model deepseek-chat)
-    3. Fallback to OPENAI_API_KEY (default OpenAI base_url, model gpt-4o-mini)
-    """
-    settings = get_settings()
-    explicit_base = settings.BRIEFING_BASE_URL
-    explicit_model = settings.BRIEFING_MODEL
-
-    if settings.BRIEFING_API_KEY:
-        model = explicit_model or "gpt-4o-mini"
-        logger.info("LLM client selected | provider=briefing | model=%s", model)
-        client = (
-            AsyncOpenAI(api_key=settings.BRIEFING_API_KEY, base_url=explicit_base)
-            if explicit_base
-            else AsyncOpenAI(api_key=settings.BRIEFING_API_KEY)
-        )
-        return client, model
-
-    if settings.DEEPSEEK_API_KEY:
-        model = explicit_model or "deepseek-chat"
-        logger.info("LLM client selected | provider=deepseek | model=%s", model)
-        client = AsyncOpenAI(
-            api_key=settings.DEEPSEEK_API_KEY,
-            base_url=explicit_base or "https://api.deepseek.com",
-        )
-        return client, model
-
-    if settings.OPENAI_API_KEY:
-        model = explicit_model or "gpt-4o-mini"
-        logger.info("LLM client selected | provider=openai | model=%s", model)
-        client = (
-            AsyncOpenAI(api_key=settings.OPENAI_API_KEY, base_url=explicit_base)
-            if explicit_base
-            else AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-        )
-        return client, model
-
-    raise BriefingGenerationError(
-        "No LLM API key found. Set BRIEFING_API_KEY, DEEPSEEK_API_KEY, or OPENAI_API_KEY."
-    )
 
 
 SYSTEM_PROMPT = """You are a ruthless, highly aggressive Wall Street M&A and negotiation strategist. You brief the deal team before a high-stakes commercial meeting. No pleasantries, no hedging, no generic consulting language. Turn the meeting purpose and available evidence into cold, specific negotiation leverage and concrete asks.
@@ -178,8 +140,6 @@ async def _call_llm_with_retry(
         {"role": "user", "content": user_message},
     ]
 
-    last_error: Exception = RuntimeError("no attempt executed")
-
     # Generate headers for Bifrost caching
     bifrost_headers = build_bifrost_headers(
         fact_base.company_id,
@@ -188,78 +148,70 @@ async def _call_llm_with_retry(
     )
     logger.info("Bifrost headers | %s", bifrost_headers)
 
-    for attempt in range(1, max_retries + 1):
-        content = ""
-        try:
-            logger.info(
-                "LLM call attempt %s/%s | model=%s",
-                attempt,
-                max_retries,
-                model,
-            )
-            response = await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                response_format={"type": "json_object"},
-                temperature=0.2,
-                extra_headers=bifrost_headers,
-            )
-            content = response.choices[0].message.content or ""
-            if not content:
-                raise ValueError("LLM returned empty content")
-
-            report = BriefingReport.model_validate_json(content)
-            logger.info(
-                "LLM call succeeded on attempt %s | confidence=%s | "
-                "news=%s hires=%s launches=%s open_questions=%s risks=%s",
-                attempt,
-                report.executive_summary.confidence,
-                len(report.news.items),
-                len(report.hires.items),
-                len(report.launches.items),
-                len(report.open_questions.items),
-                len(report.risks.items),
-            )
-            return report
-
-        except ValidationError as exc:
-            last_error = exc
-            logger.warning(
-                "LLM schema validation failed on attempt %s/%s | error=%s",
-                attempt,
-                max_retries,
-                exc,
-            )
-            messages.append({"role": "assistant", "content": content})
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "Your previous response failed schema validation: "
-                        f"{exc}. Return ONLY a valid JSON object that strictly "
-                        "matches the BriefingReport schema. No markdown fences, "
-                        "no commentary."
-                    ),
-                }
-            )
-
-        except Exception as exc:
-            last_error = exc
-            logger.warning(
-                "LLM call failed on attempt %s/%s | error=%s",
-                attempt,
-                max_retries,
-                exc,
-            )
-
-    logger.error(
-        "LLM failed after %s attempts | last_error=%s",
-        max_retries,
-        last_error,
+    @retry(
+        stop=stop_after_attempt(max_retries),
+        wait=wait_random_exponential(multiplier=1, max=16),
+        retry=retry_if_exception(is_retryable_error),
+        reraise=True,
     )
-    raise BriefingGenerationError(
-        f"LLM failed to produce a valid BriefingReport after {max_retries} attempts: {last_error}"
-    ) from last_error
+    async def _attempt() -> BriefingReport:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=0.2,
+            extra_headers=bifrost_headers,
+        )
+        content = response.choices[0].message.content or ""
+        if not content:
+            raise ValueError("LLM returned empty content")
+
+        return BriefingReport.model_validate_json(content)
+
+    try:
+        report = await _attempt()
+    except ValidationError as exc:
+        # A schema miss is a model mistake, not a transport failure, so it is
+        # handled separately: the error is fed back into the conversation to
+        # give the next attempt a chance to self-correct.
+        logger.warning("LLM schema validation failed | error=%s", exc)
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "Your previous response failed schema validation: "
+                    f"{exc}. Return ONLY a valid JSON object that strictly "
+                    "matches the BriefingReport schema. No markdown fences, "
+                    "no commentary."
+                ),
+            }
+        )
+        raise BriefingGenerationError(
+            f"LLM output did not match the BriefingReport schema: {exc}"
+        ) from exc
+    except Exception as exc:
+        if is_permanent_error(exc):
+            logger.error("LLM call rejected and cannot be retried | error=%s", exc)
+            raise BriefingGenerationError(
+                f"LLM request was rejected and cannot be retried: {exc}"
+            ) from exc
+
+        logger.error("LLM call failed after retries | error=%s", exc)
+        raise BriefingGenerationError(
+            f"LLM failed to produce a valid BriefingReport: {exc}"
+        ) from exc
+
+    logger.info(
+        "LLM call succeeded | confidence=%s | "
+        "news=%s hires=%s launches=%s open_questions=%s risks=%s",
+        report.executive_summary.confidence,
+        len(report.news.items),
+        len(report.hires.items),
+        len(report.launches.items),
+        len(report.open_questions.items),
+        len(report.risks.items),
+    )
+    return report
 
 
 async def generate_briefing_report(
@@ -281,7 +233,7 @@ async def generate_briefing_report(
         len(fact_base.analyst_opinions),
         len(fact_base.conflicts),
     )
-    client, model = _build_client()
+    client, model = build_client()
     user_message = _build_user_message(fact_base, meeting_purpose)
     report = await _call_llm_with_retry(
         client,

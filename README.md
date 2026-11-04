@@ -35,75 +35,67 @@ Given `{company, meeting_purpose}`, BriefCortex produces a structured `BriefingR
 
 <!-- ARCH_DIAGRAM -->
 
-End-to-end data flow, from the UI through the Bifrost gateway, the retrieval and cleaning layer, to structured LLM output.
+End-to-end data flow: the UI, the async job that owns the request, the retrieval and cleaning layer, and the structured LLM output.
 
 ```mermaid
 graph TD
-    %% ---------- Frontend & Gateway ----------
-    UI[Frontend UI] -->|Input: Company + Time + Purpose| GW[Bifrost Gateway]
+    %% ---------- Frontend & API ----------
+    UI[Frontend UI] -->|Input: Company + Time + Purpose| API[FastAPI]
 
-    %% ---------- Bifrost extension ----------
-    subgraph EXT["Bifrost Extension Layer"]
-        GW -.->|Intercept Request| Midware["Python Middleware<br/>Content-Aware TTL Classifier"]
-        Midware -->|Inject x-bf-cache-ttl & key| GW
-    end
-
-    %% ---------- Cache & control ----------
-    subgraph CACHE["Cache & Control Layer"]
-        GW --> CheckBrief{"1. Check Briefing Cache"}
-        CheckBrief -- Hit --> ReturnCache[Return Cached Briefing]
-        ReturnCache --> UI
-        CheckBrief -- Miss --> CheckFact{"2. Check Fact Base"}
-        CheckFact -- Valid --> CalcDelta[Calculate Incremental Window]
-        CheckFact -- Expired --> FullSearch[Full Search: 30 Days]
+    %% ---------- Job control ----------
+    subgraph CONTROL["Job Control"]
+        API --> Record[(briefings row, status=pending)]
+        Record --> Job[Async job]
+        Job --> CheckBrief{"Exact-request cache"}
+        CheckBrief -- Hit --> ReturnCache[Return cached brief]
+        CheckBrief -- Miss --> FullSearch[Search last 30 days]
     end
 
     %% ---------- Retrieval & cleaning ----------
-    subgraph RETRIEVE["Data Retrieval & Cleaning Layer"]
-        CalcDelta --> Tavily[Tavily Search API]
-        FullSearch --> Tavily
+    subgraph RETRIEVE["Retrieval & Cleaning"]
+        FullSearch --> Planner["Model search plan, categories from registry"]
+        Planner --> Tavily[Tavily Search API]
 
-        Tavily -- Network Error --> Tenacity["Tenacity: Retry"]
+        Tavily -- Network Error --> Tenacity["Tenacity: retry"]
         Tenacity --> Tavily
-        Tenacity -- Final Failure --> Fallback[Fallback: Friendly Prompt]
 
-        Tavily -- Success --> Trafilatura["Trafilatura<br/>Extract Clean Text"]
-        Trafilatura --> SmartExtract["Smart Extraction<br/>Facts vs Opinions"]
-
-        SmartExtract --> FactDB[(SQLite Fact Base)]
+        Tavily -- Success --> Scope["Per-publisher scoping, section + body rules"]
+        Scope --> Extract["Trafilatura, opening/closing split"]
+        Extract --> FactBase[(FactBase, hard facts only)]
     end
 
-    %% ---------- LLM inference ----------
-    subgraph INFER["LLM Inference Layer"]
-        FactDB --> LLM["OpenAI SDK<br/>Cloud / Local Model"]
-        Fallback --> LLM
-
-        LLM -->|Generate Result| Pydantic["Pydantic<br/>JSON Validation"]
-        Pydantic -- Failure --> RetryLLM[Auto Retry / Repair]
+    %% ---------- Inference ----------
+    subgraph INFER["Inference"]
+        FactBase --> Headers["Content-aware headers, cache key + TTL"]
+        Headers --> LLM["OpenAI-compatible model"]
+        LLM -->|JSON| Validate["Pydantic validation"]
+        Validate -- Failure --> RetryLLM["Feed error back, retry"]
         RetryLLM --> LLM
-        Pydantic -- Success --> SaveBrief[(SQLite Briefing Cache)]
+        Validate -- Success --> SaveBrief[(Briefing report, JSONB)]
     end
 
-    SaveBrief --> UI
+    SaveBrief --> API
 
     %% ---------- Styling ----------
     classDef edgeNode fill:#1f2937,stroke:#111827,stroke-width:2px,color:#ffffff
     classDef layerNode fill:#f3f4f6,stroke:#9ca3af,stroke-width:1px,color:#111827
     classDef storeNode fill:#ecfdf5,stroke:#10b981,stroke-width:2px,color:#065f46
-    classDef failNode fill:#fef2f2,stroke:#ef4444,stroke-width:1px,color:#991b1b
 
-    class GW,UI edgeNode
-    class Midware,CheckBrief,CheckFact,CalcDelta,FullSearch,ReturnCache layerNode
-    class Tavily,Tenacity,Trafilatura,SmartExtract,LLM,Pydantic,RetryLLM layerNode
-    class FactDB,SaveBrief storeNode
-    class Fallback failNode
+    class API,UI edgeNode
+    class Job,CheckBrief,ReturnCache,FullSearch,Planner,Tavily,Tenacity,Scope,Extract,Headers,LLM,Validate,RetryLLM layerNode
+    class Record,FactBase,SaveBrief storeNode
 ```
 
 *(The same diagram lives in `docs/ARCHITECTURE.md` alongside the module responsibilities and design decisions.)*
 
-### 1. Bifrost Time-Slicing
+### 1. Freshness: A 30-Day Window, Checked Twice
 
-Evidence is not a flat list. Bifrost partitions retrieved material into time slices (e.g. last 7 days / last 90 days / older), so the prompt can distinguish "fresh leverage" from "stale context". A 2023 layoff does not get used as a 2026 negotiation lever.
+Two clocks matter, and checking only one is not enough. Both are enforced over a 30-day search window.
+
+- **Publication date.** Tavily timestamps are RFC 2822 (`Wed, 21 Oct 2026 00:00:00 GMT`), which `datetime.fromisoformat` rejects outright, so the date is parsed with `email.utils.parsedate_to_datetime`. When a result still arrives without a date, a two-tier fallback runs: the date is read out of the URL slug first (offline, and it survives the anti-bot walls that answer Reuters with 401 and Bloomberg with 403), then from a page fetch via `htmldate`.
+- **Reporting period.** An article published inside the window can still report an older period ("in the first five months of 2026", "third quarter of 2025"). Those sentences are dropped. Comparisons are kept, because "lowest since April 2025" describes where things stand *now*.
+
+A 2023 layoff cannot be used as a 2026 negotiation lever.
 
 ### 2. Retrieval: Plan, Scope, Then Read
 
@@ -113,58 +105,49 @@ Retrieval is not a single query against a flat domain list.
 
 **Scoping.** Two rule tables are keyed by publisher and verified against live pages:
 
-- `SITE_SECTION_RULES` — keep/drop path prefixes, so opinion columns, live blogs, stock-quote tables and video pages are never read. Longest-domain matching keeps `markets.businessinsider.com` on its own rules.
+- `SITE_SECTION_RULES` — keep/drop path prefixes, so opinion columns, live blogs, stock-quote tables and video pages are never read. Longest-domain matching keeps `markets.businessinsider.com` on its own rules, and year-indexed paths follow the calendar instead of a hard-coded year.
 - `SITE_BODY_RULES` — per-publisher body open and close markers plus chrome-line filters. Bloomberg opens with a ~190-line corporate mega-menu, CNBC arrives as a single newline-free blob, FT returns a paywall, gasgoo trails a "Related Articles" block that names other companies. Each needs its own boundary; one shared rule set cannot cover them.
 
-**Reading.** Hard facts are the opening three paragraphs plus the closing paragraph. Middle paragraphs contribute only their first sentence, and only when it carries a negative signal — so the fact base gets the leverage without absorbing the commentator's framing.
+**Reading.** Hard facts are the opening three paragraphs plus the closing paragraph. Middle paragraphs contribute only their first sentence, and only when it carries a negative signal — so the fact base gets the leverage without absorbing the commentator's framing. Signals are matched on word boundaries plus inflections, so `miss` cannot fire inside `mission`.
 
-**Depth.** A coverage loop keeps searching while a round still contributes previously unseen URLs that carry an article body (`MAX_SEARCH_ROUNDS=20`). Tavily returns 10 results by default and accepts 20; above 20 the response is unreliable (measured: 25 → 16, 30 → 1), so extra coverage comes from more queries rather than a larger page size. When a publisher returns results without bodies, that publisher is dropped and the same queries re-run, so a syndicated telling can take the slot an empty page was holding.
+**Depth.** Coverage stops on two budgets. A round must contribute previously unseen URLs that carry an article body, otherwise the loop exits (`MIN_USABLE_PER_ROUND`); the loop also stops at `SEARCH_BUDGET_SECONDS` so a request returns inside the client's poll window, with `MAX_SEARCH_ROUNDS=8` guarding a runaway plan. Tavily returns 10 results by default and accepts 20; above 20 the response is unreliable (measured: 25 → 16, 30 → 1), so extra coverage comes from more queries rather than a larger page size. If a publisher returns results without bodies, it is dropped and the same queries re-run once, so a syndicated telling can take the slot an empty page was holding.
 
-### 3. Freshness: Publication Date and Reporting Period
+**Deduplication.** An identical sentence is stored once. A syndicated re-run that extends the stored sentence word for word replaces it, but only when the shared opening is long enough to be the same telling — two different facts that happen to open with the same clause both stay.
 
-Two different clocks matter, and only checking one is not enough.
-
-- **Publication date.** Tavily timestamps are RFC 2822 (`Wed, 21 Oct 2026 00:00:00 GMT`), which `datetime.fromisoformat` rejects outright, so the date is parsed with `email.utils.parsedate_to_datetime`. When a result still arrives without a date, a two-tier fallback runs: the date is read out of the URL slug first (offline, and it survives the anti-bot walls that answer Reuters with 401 and Bloomberg with 403), then from a page fetch via `htmldate`.
-- **Reporting period.** An article published inside the window can still report an older period ("in the first five months of 2026", "third quarter of 2025"). Those sentences are dropped. Comparisons are kept, because "lowest since April 2025" describes where things stand *now*.
-
-Duplicate sentences are kept once, and the longer telling wins — a bare figure from one outlet does not shadow the same figure with its breakdown from another.
-
-### 4. Two Report Modes
+### 3. Two Report Modes
 
 The report follows the meeting objective when one is supplied: numeric asks, leverage, trades.
 
 With no objective, the brief is a *fundamentals* brief — the company's business direction, what is demonstrably working, and what deserves caution. In that mode the model is forbidden from inventing a target or emitting numeric demands, and the anti-hallucination fallback sentence is scoped to negotiation mode only.
 
-### 5. Fact / Opinion Separation
-
+### 4. Fact / Opinion Separation
 `FactBase` carries two distinct lists: `hard_facts` and `analyst_opinions`. They are rendered into the LLM prompt as separate, labeled blocks (`<HARD_FACTS>`, `<ANALYST_OPINIONS>`). The system prompt forbids using unverified commentary as negotiation leverage. If hard facts contain no negative signal, the model is required to output the exact fallback sentence:
 
 > "Evidence insufficient; recommend standard outreach."
 
 No fabrication, no manufactured aggression.
 
-### 6. Conflict Detection as an Independent, Auditable Lane
-
+### 5. Conflict Detection as an Independent, Auditable Lane
 `detect_fact_conflicts()` runs a deterministic regex rule engine over `hard_facts` only. It returns structured conflicts with both sides' `source_url`, and its output is **never fed into the LLM prompt**.
 
 LLM output and conflict detection are two independent tracks by design: semantics cannot override evidence, and evidence cannot be reinterpreted by semantics.
 
-### 7. Dual-Layer Cache
+### 6. Cache Status
 
-- **Layer 1 — exact-request cache:** identical `{company, meeting_purpose}` returns the stored report instantly.
-- **Layer 2 — evidence cache:** Tavily retrieval results are cached per company with a TTL, so a re-run with a different `meeting_purpose` skips retrieval entirely.
+Not yet wired. `bifrost_headers.py` computes a content-aware cache key and TTL for every LLM call, but no cache store consumes them yet, so a repeated request still re-runs retrieval and inference.
 
-Demo implication: the second run is a millisecond response, not a 30-second LLM call.
+### 7. Tested, Not Vibes
 
-### 8. Tested, Not Vibes
-
-The repo ships with `pytest` coverage for both the prompt/schema contract and the conflict engine, including:
+The repo ships with `pytest` coverage for the prompt/schema contract, the conflict engine, the extraction rules and the cache classifier, including:
 
 - Prompt output schema must match the real Pydantic `BriefingReport` schema.
 - No ghost fields (`verified`, `negotiation_levers`, `target_concessions`) may appear.
 - `\brif\b` must not match `tariff`.
 - Single-fact internal contradictions must not be reported as cross-item conflicts.
 - Reverse-direction pairs must produce a description with the correct fact on each side.
+- Negative-signal keywords match whole words, so `miss` cannot match `mission`.
+- Two distinct facts sharing an opening clause are both kept; only a long word-for-word extension replaces the shorter telling.
+- The cache TTL classifies evidence by whole word, so `third quarter` is not read as a hiring signal.
 
 ---
 
@@ -181,8 +164,8 @@ BriefCortex/
 │   │   ├── core/             # Settings + DB engine
 │   │   ├── db/               # SQLAlchemy ORM models
 │   │   ├── repositories/     # Data access (Postgres)
-│   │   ├── models/           # Pydantic request/response schemas
-│   │   ├── services/         # Ingestion, search planning, analysis, conflict detection, briefing orchestration
+│   │   ├── models/           # Pydantic schemas (briefing report + fact base)
+│   │   ├── services/         # Ingestion, search planning, analysis, conflict detection, cache headers, job orchestration
 │   │   └── mock/             # Demo briefing payload
 │   └── tests/
 └── docs/                     # ARCHITECTURE, CLAUDE, KARPATHY
@@ -220,7 +203,7 @@ Open [http://localhost:3000](http://localhost:3000) — the app redirects to `/b
 
 ### API contract
 
-- `POST /api/briefings` — accepts `{ company_name, meeting_time, meeting_purpose }`, returns `202` with `{ id }`
+- `POST /api/briefings` — accepts `{ company_name, meeting_time, meeting_purpose }`, returns `202` with `{ id, status }`
 - `GET /api/briefings` — list saved briefings (newest first)
 - `GET /api/briefings/{id}` — fetch/poll a briefing by id until `status` is `completed` or `failed`
 
@@ -230,21 +213,41 @@ Open [http://localhost:3000](http://localhost:3000) — the app redirects to `/b
 
 ```bash
 cd backend
+python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 20 passed.
+Expected: 113 passed.
+
+> Test count is maintained locally while the frontend suite is still being
+> written; the shared baseline will be the sum of this backend count and whatever
+> the frontend contributes.
 
 > Note: on Python 3.15 the Tsinghua mirror does not ship a `pytest` wheel. Install from the official index: `pip install pytest --index-url https://pypi.org/simple`.
 
 ---
 
+## Database Migrations
+
+Schema changes are owned by Alembic. `init_db()` only checks connectivity and
+warns when the database revision is behind the code; it never alters tables.
+
+```bash
+cd backend
+python -m alembic upgrade head        # bring a database up to date
+python -m alembic revision --autogenerate -m "describe the change"
+python -m alembic check               # fail if models and migrations disagree
+```
+
+---
+
 ## Design Constraints
 
-Two constraints are enforced in code, not just in prose:
+Three constraints are enforced in code, not just in prose:
 
 - **Hard facts are the only source of negotiation leverage.** Unverified commentary is rendered in a separate prompt block and cannot be promoted into the numeric asks of `executive_summary.recommendation`.
 - **Conflict detection is not part of the LLM path.** `detect_fact_conflicts()` returns structured conflicts to callers; it is never serialized into the model input. The two outputs are consumed independently.
+- **The pipeline mode is explicit.** `MOCK_DATA` defaults to `false`; the mock path must be switched on deliberately and logs a warning at startup, and a missing `TAVILY_API_KEY` or LLM key is reported as an error instead of silently serving sample data.
 
 ---
 

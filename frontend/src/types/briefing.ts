@@ -39,6 +39,39 @@ export interface BriefingReport {
   executive_summary: ExecutiveSummary;
 }
 
+export interface EvidenceConflict {
+  conflict_type: string;
+  fact_a: string;
+  source_a: string;
+  fact_b: string;
+  source_b: string;
+  description: string;
+}
+
+export interface EvidenceItem {
+  content: string;
+  source_url: string;
+  publish_date?: string | null;
+}
+
+export interface IncidentalItem {
+  content: string;
+  source_url: string;
+  publish_date?: string | null;
+  provenance: "corroborated" | "unverified";
+  corroborating_url?: string | null;
+  article_subject?: string | null;
+}
+
+export interface EvidenceSummary {
+  hard_fact_count: number;
+  opinion_count: number;
+  conflict_count: number;
+  conflicts: EvidenceConflict[];
+  analyst_opinions: EvidenceItem[];
+  incidental_facts: IncidentalItem[];
+}
+
 export interface BriefingStatusResponse {
   id: string;
   status: BriefingJobStatus;
@@ -46,6 +79,7 @@ export interface BriefingStatusResponse {
   meeting_time: string;
   meeting_purpose: string;
   report: BriefingReport | null;
+  evidence: EvidenceSummary | null;
   error: string | null;
   created_at?: string | null;
   updated_at?: string | null;

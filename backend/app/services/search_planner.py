@@ -7,6 +7,8 @@ from typing import Dict, List
 
 from pydantic import BaseModel, Field
 
+from app.services.hiring import hiring_queries
+from app.services.llm_client import build_client
 from app.services.logger_service import get_logger
 
 logger = get_logger("search_planner")
@@ -151,6 +153,7 @@ def _fallback_queries(company: str, purpose: str, fundamentals: bool) -> List[st
             f"{company} strategy update investor day",
             f"{company} risk disclosure annual filing",
             f"{company} sector outlook peers comparison",
+            *hiring_queries(company),
         ]
 
     return [
@@ -174,6 +177,7 @@ def _fallback_queries(company: str, purpose: str, fundamentals: bool) -> List[st
         f"{company} regulatory filing disclosure",
         f"{company} analyst commentary estimates",
         f"{company} peer benchmark comparison",
+        *hiring_queries(company),
     ]
 
 
@@ -283,9 +287,7 @@ async def plan_searches(company: str, purpose: str) -> SearchPlan:
     )
 
     try:
-        from app.services.analysis import _build_client
-
-        client, model = _build_client()
+        client, model = build_client()
         response = await client.chat.completions.create(
             model=model,
             messages=[

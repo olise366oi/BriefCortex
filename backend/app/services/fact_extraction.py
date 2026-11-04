@@ -4,11 +4,13 @@ import re
 from typing import List, Optional
 
 from app.services.keywords import match_word
+from app.services.urls import host_of
 from app.services.source_rules import (
     HARD_FACT_HEAD_PARAGRAPHS,
     MIN_PARAGRAPH_LENGTH,
     NEGATIVE_SIGNAL_KEYWORDS,
     NEGATIVE_SIGNAL_MAX_PER_SOURCE,
+    OPINION_MAX_PER_SOURCE,
 )
 
 # Source credibility ranking, most authoritative first. Results from an earlier
@@ -61,19 +63,15 @@ def extract_hard_facts(clean_text: str) -> List[str]:
     - The opening paragraphs and the closing paragraph are always read.
     - Middle paragraphs are never read as prose; only their first sentence is
       inspected, and only to recover the negative signals a negotiator needs.
-    - Middle sentences without a negative signal are dropped, so commentator
-      framing cannot leak into the fact base.
+    - Middle sentences without a negative signal are dropped from the fact
+      base, so commentator framing cannot leak into it. They are still
+      recoverable as analyst opinions, which the prompt quarantines.
 
     Paragraphs shorter than MIN_PARAGRAPH_LENGTH are dropped, because Tavily
     markdown contains headings, list items and quote blocks that are
     structurally not paragraphs.
     """
-    paragraphs = [
-        paragraph.strip()
-        for paragraph in re.split(r"\n\s*\n", clean_text)
-        if paragraph.strip() and len(paragraph.strip()) >= MIN_PARAGRAPH_LENGTH
-    ]
-
+    paragraphs = _paragraphs(clean_text)
     if not paragraphs:
         return []
 
@@ -99,22 +97,48 @@ def extract_hard_facts(clean_text: str) -> List[str]:
     return hard_texts + negative_texts
 
 
-def _host_of(url: str) -> str:
-    host = url.strip().lower()
-    for separator in ("?", "#"):
-        if separator in host:
-            host = host.split(separator, 1)[0]
-    if "//" in host:
-        host = host.split("//", 1)[1]
-    host = host.split("/", 1)[0]
-    if host.startswith("www."):
-        host = host[len("www."):]
-    return host
+def extract_analyst_opinions(clean_text: str, hard_facts: List[str]) -> List[str]:
+    """Recover the commentary that the hard-fact split deliberately dropped.
+
+    Only the middle paragraphs are read, and only their first sentence. A
+    sentence that already entered the fact base is not repeated here, and one
+    carrying a negative signal is a fact, not an opinion. These lines are
+    rendered in their own prompt block and may not be used as leverage.
+    """
+    paragraphs = _paragraphs(clean_text)
+    if len(paragraphs) <= HARD_FACT_HEAD_PARAGRAPHS:
+        return []
+
+    middle = paragraphs[HARD_FACT_HEAD_PARAGRAPHS:-1]
+    dropped = {dedup_key(text) for text in hard_facts}
+
+    opinions: List[str] = []
+    for paragraph in middle:
+        sentence = first_sentence(paragraph)
+        if not sentence or has_negative_signal(sentence):
+            continue
+        if dedup_key(sentence) in dropped:
+            continue
+
+        opinions.append(sentence)
+        if len(opinions) >= OPINION_MAX_PER_SOURCE:
+            break
+
+    return opinions
+
+
+def _paragraphs(clean_text: str) -> List[str]:
+    """Split clean text into paragraph-level blocks worth reading."""
+    return [
+        paragraph.strip()
+        for paragraph in re.split(r"\n\s*\n", clean_text)
+        if paragraph.strip() and len(paragraph.strip()) >= MIN_PARAGRAPH_LENGTH
+    ]
 
 
 def source_tier(url: str) -> int:
     """Rank a source by credibility tier; unknown hosts rank last."""
-    host = _host_of(url)
+    host = host_of(url)
     for index, domain in enumerate(SOURCE_PRIORITY):
         if host.endswith(domain):
             return index
@@ -128,7 +152,7 @@ def publisher_of(url: str) -> str:
     articles are read together and de-duplicated before the next publisher in
     the priority list is opened.
     """
-    host = _host_of(url)
+    host = host_of(url)
     for domain in SOURCE_PRIORITY:
         if host.endswith(domain):
             return domain

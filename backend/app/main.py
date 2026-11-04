@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routers import router
 from app.core.config import ENV_FILE, get_settings
-from app.core.database import init_db
+from app.core.database import DatabaseUnavailableError, init_db
 from app.services import briefing_service
 from app.services.logger_service import configure_logging, get_logger
 
@@ -41,7 +41,7 @@ def _log_startup_configuration() -> None:
         for label, present in (
             ("TAVILY_API_KEY", settings.has_search_credentials),
             (
-                "an LLM key (BRIEFING_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY)",
+                "an LLM route (GATEWAY_BASE_URL, DEEPSEEK_API_KEY or OPENAI_API_KEY)",
                 settings.has_llm_credentials,
             ),
         )
@@ -60,7 +60,11 @@ def _log_startup_configuration() -> None:
 async def lifespan(_app: FastAPI):
     configure_logging(force=True)
     _log_startup_configuration()
-    init_db()
+    try:
+        init_db()
+    except DatabaseUnavailableError as exc:
+        logger.error("%s", exc)
+        raise
     await briefing_service.recover_stale_jobs()
     yield
     await briefing_service.wait_for_jobs()

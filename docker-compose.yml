@@ -10,5 +10,40 @@ services:
     volumes:
       - briefcortex_pg:/var/lib/postgresql/data
 
+  # The gateway every model call passes through. The backend points here instead
+  # of at a provider directly, so caching and logging live in one place.
+  bifrost:
+    image: maximhq/bifrost:v2.4.0
+    ports:
+      - "8080:8080"
+    # Provider credentials come from this file, not from the parent shell: the
+    # backend's keys live in machine-level environment variables that a
+    # container cannot inherit, so the gateway needs its own copy on disk.
+    # .env.example is used directly because backend/.env does not exist yet; a
+    # real .env takes precedence when someone creates one.
+    env_file:
+      - path: ./backend/.env
+        required: false
+      - path: ./backend/.env.example
+        required: false
+    environment:
+      APP_PORT: 8080
+      APP_HOST: 0.0.0.0
+      LOG_LEVEL: info
+      LOG_STYLE: pretty
+    volumes:
+      - ./bifrost:/app/data
+    depends_on:
+      - redis-bifrost
+    restart: unless-stopped
+
+  # Vector store for the semantic cache plugin. The plugin needs RediSearch
+  # (FT.* commands), which plain redis does not ship, so this uses Redis Stack.
+  redis-bifrost:
+    image: redis/redis-stack-server:7.4.0-v0
+    environment:
+      REDIS_ARGS: "--save '' --appendonly no"
+    restart: unless-stopped
+
 volumes:
   briefcortex_pg:

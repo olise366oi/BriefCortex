@@ -11,5 +11,9 @@ export type {
   BriefingUiState,
   Claim,
   ClaimModule,
+  EvidenceConflict,
+  EvidenceItem,
+  EvidenceSummary,
   ExecutiveSummary,
+  IncidentalItem,
 } from "./briefing";

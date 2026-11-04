@@ -105,6 +105,9 @@ NEGATIVE_SIGNAL_KEYWORDS = (
 # article cannot flood the fact base.
 NEGATIVE_SIGNAL_MAX_PER_SOURCE = 4
 
+# Commentary is the weaker signal of the two, so it gets a smaller cap.
+OPINION_MAX_PER_SOURCE = 3
+
 # Tavily raw_content is page markdown, so the article body arrives wrapped in
 # navigation trees, share rows, related-story blocks and legal boilerplate.
 # Every publisher below was inspected on a live page to record exactly where

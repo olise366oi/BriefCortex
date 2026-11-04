@@ -10,6 +10,7 @@ import httpx
 from htmldate import find_date
 
 from app.services.logger_service import get_logger
+from app.services.urls import url_path
 
 logger = get_logger("freshness")
 
@@ -78,17 +79,6 @@ COMPARISON_MARKERS = (
 )
 
 
-def _url_path(url: str) -> str:
-    lowered = url.strip().lower()
-    for separator in ("?", "#"):
-        if separator in lowered:
-            lowered = lowered.split(separator, 1)[0]
-    if "//" in lowered:
-        lowered = lowered.split("//", 1)[1]
-    slash = lowered.find("/")
-    return lowered[slash:] if slash != -1 else "/"
-
-
 def parse_publish_date(value: object) -> Optional[datetime]:
     """Parse a Tavily published_date.
 
@@ -128,7 +118,7 @@ def parse_publish_date(value: object) -> Optional[datetime]:
 
 
 def _date_from_url_slug(url: str) -> Optional[datetime]:
-    path = _url_path(url)
+    path = url_path(url)
     for pattern in URL_DATE_PATTERNS:
         match = pattern.search(path)
         if not match:

@@ -28,11 +28,26 @@ class Settings(BaseSettings):
     ENABLE_LOGS: bool = True
 
     TAVILY_API_KEY: Optional[str] = None
-    BRIEFING_API_KEY: Optional[str] = None
-    BRIEFING_BASE_URL: Optional[str] = None
-    BRIEFING_MODEL: Optional[str] = None
     DEEPSEEK_API_KEY: Optional[str] = None
+    DEEPSEEK_MODEL: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
+    OPENAI_MODEL: Optional[str] = None
+
+    # When set, every model call goes through the Bifrost gateway instead of
+    # straight to a provider, so caching and logging apply to all of them.
+    GATEWAY_BASE_URL: Optional[str] = None
+    GATEWAY_MODEL: Optional[str] = None
+
+    @property
+    def llm_route(self) -> str:
+        """Which path model calls take, for startup logging."""
+        if self.GATEWAY_BASE_URL:
+            return "gateway"
+        if self.DEEPSEEK_API_KEY:
+            return "deepseek"
+        if self.OPENAI_API_KEY:
+            return "openai"
+        return "none"
 
     model_config = SettingsConfigDict(
         env_file=ENV_FILE,
@@ -43,7 +58,11 @@ class Settings(BaseSettings):
 
     @property
     def has_llm_credentials(self) -> bool:
-        return bool(self.BRIEFING_API_KEY or self.DEEPSEEK_API_KEY or self.OPENAI_API_KEY)
+        return bool(
+            self.GATEWAY_BASE_URL
+            or self.DEEPSEEK_API_KEY
+            or self.OPENAI_API_KEY
+        )
 
     @property
     def has_search_credentials(self) -> bool:

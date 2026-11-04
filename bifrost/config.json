@@ -2,7 +2,8 @@
   "$schema": "https://www.getbifrost.ai/schema",
   "client": {
     "drop_excess_requests": false,
-    "enable_logging": true
+    "enable_logging": true,
+    "enforce_auth_on_inference": false
   },
   "providers": {
     "deepseek": {
@@ -10,7 +11,7 @@
         {
           "name": "deepseek-primary",
           "value": "env.DEEPSEEK_API_KEY",
-          "models": ["*"],
+          "models": ["deepseek-flash", "deepseek-v4-pro"],
           "weight": 1.0
         }
       ]
@@ -34,7 +35,7 @@
     "enabled": true,
     "type": "redis",
     "config": {
-      "addr": "bifrost-redis:6379"
+      "addr": "redis-bifrost:6379"
     }
   },
   "plugins": [
@@ -43,7 +44,7 @@
       "enabled": true,
       "config": {
         "dimension": 1,
-        "ttl": "5m",
+        "ttl": "30m",
         "cache_by_model": true,
         "cache_by_provider": true
       }

@@ -6,18 +6,16 @@ import asyncio
 import hashlib
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from typing import List, Optional, Tuple
 
 from pydantic import ValidationError
-from tenacity import retry, stop_after_attempt, wait_random_exponential
-from tavily import TavilyClient
 
-from app.core.config import get_settings
 from app.models.briefing import BriefingRequest
 from app.models.fact_base import FactBase, FactItem
 from app.services.fact_extraction import (
     dedup_key,
+    extract_analyst_opinions,
     extract_hard_facts,
     find_prefix_twin,
     order_by_publisher,
@@ -28,25 +26,19 @@ from app.services.freshness import (
     parse_publish_date,
     resolve_publish_dates,
 )
+from app.services.article_subject import classify_article_subjects
+from app.services.corroboration import corroborate_incidental_facts
+from app.services.dedup import drop_duplicate_facts
+from app.services.incidental import opening_sentence
+from app.services.incidental_harvest import harvest_incidental_facts
 from app.services.logger_service import get_logger
-from app.services.publisher_filter import (
-    extract_clean_text,
-    filter_results_for_company,
-    host_of,
-)
+from app.services.publisher_filter import extract_clean_text, host_of
 from app.services.search_planner import SearchPlan, plan_searches
+from app.services.tavily_search import tavily_search
+from app.services.window import compute_evidence_window
 
 logger = get_logger("ingestion")
 
-
-class TavilySearchError(Exception):
-    """Raised when Tavily search fails after retries."""
-
-
-# Tavily returns 10 results by default and accepts up to 20. Above 20 the
-# response is unreliable (measured: 25 -> 16, 30 -> 1, 40 -> 10), so 20 is the
-# hard ceiling and additional coverage comes from running more queries.
-TAVILY_MAX_RESULTS = 20
 
 # The loop exits once a round contributes no new usable URL, so the round cap is
 # only a guard against a runaway plan and rarely reached.
@@ -62,101 +54,15 @@ SEARCH_BUDGET_SECONDS = 45.0
 # because a round of quote shells adds nothing to the fact base.
 MIN_USABLE_PER_ROUND = 1
 
+# Retrieval stops after this many consecutive rounds that produced nothing new
+# compared with both the URLs seen this run and the URLs already stored. One
+# fully-duplicate round can be a reordering; two in a row means the queries are
+# exhausted.
+MAX_STALE_ROUNDS = 2
+
 # Once this many results already carry a body, the body refill is skipped: it
 # re-runs a full round of queries and mostly returns the same shells again.
 REFILL_MIN_USABLE_RESULTS = 8
-
-WINDOW_DAYS = 30
-
-
-def _calculate_date_window(
-    last_refresh_date: Optional[datetime] = None,
-) -> Tuple[str, str]:
-    """Return the Tavily search window as (start_date, end_date) in ISO format.
-
-    The window is 30 days. A last_refresh_date less than 30 days ago shortens it
-    so a re-run only looks at new material; otherwise it looks back the full
-    window. Persistence of last_refresh_date belongs to the service layer, so
-    this always falls back to the full window today.
-    """
-    today = datetime.now(timezone.utc).date()
-
-    if last_refresh_date is not None:
-        if last_refresh_date.tzinfo is None:
-            last_date = last_refresh_date.date()
-        else:
-            last_date = last_refresh_date.astimezone(timezone.utc).date()
-
-        days_since_last_refresh = (today - last_date).days
-        if 0 <= days_since_last_refresh < WINDOW_DAYS:
-            return last_date.isoformat(), today.isoformat()
-
-    return (today - timedelta(days=WINDOW_DAYS)).isoformat(), today.isoformat()
-
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_random_exponential(multiplier=1, max=10),
-    reraise=True,
-)
-def _tavily_search(
-    query: str,
-    start_date: str,
-    end_date: str,
-    company_name: str,
-    domains: List[str],
-) -> List[dict]:
-    """Run one Tavily query, retrying transient failures with backoff."""
-    try:
-        api_key = get_settings().TAVILY_API_KEY
-        if not api_key:
-            raise RuntimeError("TAVILY_API_KEY is not configured")
-
-        logger.info(
-            "Tavily search | query=%r | window=%s..%s | domains=%s | max=%s",
-            query,
-            start_date,
-            end_date,
-            domains,
-            TAVILY_MAX_RESULTS,
-        )
-        client = TavilyClient(api_key=api_key)
-
-        response = client.search(
-            query=query,
-            search_depth="advanced",
-            include_raw_content=True,
-            start_date=start_date,
-            end_date=end_date,
-            include_domains=domains,
-            topic="news",
-            max_results=TAVILY_MAX_RESULTS,
-        )
-
-        if not isinstance(response, dict):
-            logger.warning("Tavily returned non-dict response")
-            return []
-
-        results = response.get("results", [])
-        if not isinstance(results, list):
-            logger.warning("Tavily results were not a list")
-            return []
-
-        kept = filter_results_for_company(results, company_name)
-        logger.info("Filter kept %s of %s results", len(kept), len(results))
-        return kept
-
-    except Exception as exc:
-        logger.exception(
-            "Tavily search failed | query=%r | window=%s..%s",
-            query,
-            start_date,
-            end_date,
-        )
-        raise TavilySearchError(
-            f"Tavily search failed (query={query!r}, "
-            f"start_date={start_date}, end_date={end_date}): {exc}"
-        ) from exc
 
 
 async def _search_query(
@@ -167,7 +73,7 @@ async def _search_query(
     company_name: str,
 ) -> List[dict]:
     return await asyncio.to_thread(
-        _tavily_search, query, start_date, end_date, company_name, domains
+        tavily_search, query, start_date, end_date, company_name, domains
     )
 
 
@@ -198,7 +104,12 @@ async def _run_round(
     merged: List[dict],
     seen_urls: set,
 ) -> Tuple[int, int]:
-    """Run a round of queries concurrently and fold the results in."""
+    """Run a round of queries concurrently and fold the results in.
+
+    ``seen_urls`` already contains every URL stored from earlier runs, so a
+    result the company has already been briefed on is not counted as new.
+    Returns (usable_with_body, newly_added).
+    """
     batches = await asyncio.gather(
         *[
             _search_query(query, domains, start_date, end_date, company_name)
@@ -280,15 +191,21 @@ async def _search_plan(
     start_date: str,
     end_date: str,
     company_name: str,
+    known_urls: Optional[set] = None,
 ) -> List[dict]:
-    """Run the planned queries, then keep searching until a round adds nothing.
+    """Run the planned queries until two consecutive rounds bring nothing new.
 
-    Two budgets bound the work: a round only continues while the previous round
-    contributed new usable URLs, and the whole loop stops at
-    SEARCH_BUDGET_SECONDS so a request cannot outlive the UI's poll timeout.
+    Freshness is measured against everything already known: the URLs collected
+    during this run and the URLs stored by earlier runs for the same company.
+    A single repeat round can just be result reordering, so retrieval continues
+    through one of them and stops only when the next round repeats as well.
+
+    Two budgets also apply: MAX_SEARCH_ROUNDS guards a runaway plan, and
+    SEARCH_BUDGET_SECONDS keeps the request inside the client's poll window.
     """
     merged: List[dict] = []
-    seen_urls: set = set()
+    seen_urls: set = set(known_urls or set())
+    known_before = set(seen_urls)
     started_at = time.monotonic()
 
     usable, added = await _run_round(
@@ -296,8 +213,9 @@ async def _search_plan(
         merged, seen_urls,
     )
     logger.info(
-        "Search round 1 | queries=%s | usable=%s | new_urls=%s | total=%s | elapsed=%.1fs",
-        len(plan.queries), usable, added, len(merged),
+        "Search round 1 | queries=%s | usable=%s | new_urls=%s | known_before=%s "
+        "| total=%s | elapsed=%.1fs",
+        len(plan.queries), usable, added, len(known_before), len(merged),
         time.monotonic() - started_at,
     )
 
@@ -306,12 +224,14 @@ async def _search_plan(
     )
 
     round_index = 1
+    stale_rounds = 0 if added else 1
     pending = list(plan.fallback_queries)
 
     while (
         round_index < MAX_SEARCH_ROUNDS
         and usable >= MIN_USABLE_PER_ROUND
         and pending
+        and stale_rounds < MAX_STALE_ROUNDS
         and time.monotonic() - started_at < SEARCH_BUDGET_SECONDS
     ):
         round_index += 1
@@ -322,21 +242,20 @@ async def _search_plan(
             take, plan.domains, start_date, end_date, company_name,
             merged, seen_urls,
         )
+        stale_rounds = 0 if added else stale_rounds + 1
+
         logger.info(
-            "Search round %s | queries=%s | usable=%s | new_urls=%s | total=%s | elapsed=%.1fs",
-            round_index, len(take), usable, added, len(merged),
+            "Search round %s | queries=%s | usable=%s | new_urls=%s | stale_streak=%s "
+            "| total=%s | elapsed=%.1fs",
+            round_index, len(take), usable, added, stale_rounds, len(merged),
             time.monotonic() - started_at,
         )
 
-        if added == 0:
-            logger.info(
-                "Coverage saturated at round %s | no new URL contributed", round_index
-            )
-            break
-
     logger.info(
-        "Search plan executed | rounds=%s | merged=%s | pending_queries=%s | elapsed=%.1fs",
-        round_index, len(merged), len(pending), time.monotonic() - started_at,
+        "Search plan executed | rounds=%s | merged=%s | pending_queries=%s "
+        "| stale_streak=%s | elapsed=%.1fs",
+        round_index, len(merged), len(pending), stale_rounds,
+        time.monotonic() - started_at,
     )
     return merged
 
@@ -370,14 +289,71 @@ def _build_company_id(company_name: str) -> str:
     return f"company-{digest}"
 
 
-def _collect_hard_facts(
+async def _route_and_collect(
     results: List[dict],
     window_start: str,
-) -> Tuple[List[FactItem], dict]:
-    """Read every result and return the deduplicated hard facts plus counters."""
+    company: str,
+) -> Tuple[List[FactItem], List[FactItem], List[dict], List[dict], dict]:
+    """Route each article by its subject, then read it accordingly.
+
+    An article whose subject is us writes our fact base. An article about someone
+    else is not thrown away: it is returned so the incidental stage can mine the
+    sentences in it that are about us. Routing on subject rather than on "did the
+    name appear" is what stops a competitor's results being filed as ours.
+    """
+    prepared: List[dict] = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        url = str(result.get("url") or "")
+        clean_text = extract_clean_text(result.get("raw_content"), url)
+        if not clean_text:
+            continue
+        prepared.append({"result": result, "url": url, "clean_text": clean_text})
+
+    routes = await classify_article_subjects(
+        [opening_sentence(item["clean_text"]) for item in prepared],
+        company,
+    )
+    by_index = {route.index: route for route in routes}
+
+    own_articles: List[dict] = []
+    other_articles: List[dict] = []
+    for index, item in enumerate(prepared):
+        route = by_index.get(index)
+        entry = {
+            "result": item["result"],
+            "url": item["url"],
+            "clean_text": item["clean_text"],
+        }
+        if route is not None and route.subject == "primary":
+            own_articles.append(entry)
+        else:
+            # Either a comparison or a passing mention: the article is not ours,
+            # but it may contain a sentence that is. Both go to the incidental
+            # stage so the mention is kept instead of discarded with the article.
+            other_articles.append(entry)
+
+    hard_facts, analyst_opinions, stats = _collect_hard_facts(
+        own_articles, window_start
+    )
+    return hard_facts, analyst_opinions, other_articles, prepared, stats
+
+
+def _collect_hard_facts(
+    articles: List[dict],
+    window_start: str,
+) -> Tuple[List[FactItem], List[FactItem], dict]:
+    """Read articles that are about our company and return facts and opinions.
+
+    Opinions are collected in the same pass so the two lists stay two views of
+    one reading of each article, not two separate extractions.
+    """
     hard_facts: List[FactItem] = []
+    analyst_opinions: List[FactItem] = []
     # Normalized text per stored fact, positionally aligned with hard_facts.
     normalized_facts: List[str] = []
+    opinion_keys: set[str] = set()
     fact_index: dict[str, int] = {}
     stats = {
         "extracted": 0,
@@ -388,13 +364,12 @@ def _collect_hard_facts(
     }
     seen_publishers: set[str] = set()
 
-    for result in results:
-        if not isinstance(result, dict):
-            stats["skipped"] += 1
-            continue
-
-        source_url = str(result.get("url") or "")
-        publish_date = parse_publish_date(result.get("published_date"))
+    for article in articles:
+        source_url = article["url"]
+        publish_date = parse_publish_date(
+            article["result"].get("published_date")
+        )
+        clean_text = article["clean_text"]
 
         publisher = publisher_of(source_url)
         if publisher not in seen_publishers:
@@ -404,14 +379,21 @@ def _collect_hard_facts(
                 len(seen_publishers), publisher, len(hard_facts),
             )
 
-        clean_text = extract_clean_text(result.get("raw_content"), source_url)
-        if not clean_text:
-            stats["skipped"] += 1
-            logger.info("Skipped source (no clean text) | url=%s", source_url)
-            continue
-
         stats["extracted"] += 1
         texts = extract_hard_facts(clean_text)
+
+        for sentence in extract_analyst_opinions(clean_text, texts):
+            if is_stale_period(sentence, window_start):
+                stats["stale_fact"] += 1
+                continue
+            key = dedup_key(sentence)
+            if key in opinion_keys or key in fact_index:
+                continue
+            opinion_item = _build_fact_item(sentence, source_url, publish_date)
+            if opinion_item is None:
+                continue
+            opinion_keys.add(key)
+            analyst_opinions.append(opinion_item)
 
         fresh: List[str] = []
         for text in texts:
@@ -469,14 +451,26 @@ def _collect_hard_facts(
                 source_url, replaced,
             )
 
-    return hard_facts, stats
+    return hard_facts, analyst_opinions, stats
 
 
-async def ingest_company_data(request: BriefingRequest) -> FactBase:
+async def ingest_company_data(
+    request: BriefingRequest,
+    *,
+    coverage_end: Optional[date] = None,
+    stored_facts: Optional[List[FactItem]] = None,
+    stored_opinions: Optional[List[FactItem]] = None,
+    known_urls: Optional[set] = None,
+) -> FactBase:
     """Ingest company data and return a validated FactBase.
 
-    analyst_opinions stays empty on purpose: commentator framing must not
-    reach the LLM, so the report is generated from hard facts alone.
+    The evidence window ends at the meeting, not at today, so a meeting six days
+    out only looks at the 24 days that have already happened. Facts already
+    stored for this company are folded back into the result, so a second run
+    searches the increment instead of the whole window.
+
+    analyst_opinions stays empty on purpose: commentator framing must not reach
+    the LLM, so the report is generated from hard facts alone.
     """
     logger.info(
         "Ingestion started | company=%r | purpose=%r | meeting_time=%s",
@@ -485,28 +479,103 @@ async def ingest_company_data(request: BriefingRequest) -> FactBase:
         request.meeting_time.isoformat(),
     )
 
-    start_date, end_date = _calculate_date_window()
-    logger.info("Ingestion date window | start=%s | end=%s", start_date, end_date)
-
-    company_label = request.company_name.strip()
-    plan = await plan_searches(company_label, request.meeting_purpose.strip())
+    window = compute_evidence_window(
+        request.meeting_time, coverage_end=coverage_end
+    )
     logger.info(
-        "Search plan | industry=%s | categories=%s | fundamentals=%s",
-        plan.industry, plan.categories, plan.fundamentals,
+        "Evidence window | window=%s..%s | observable_to=%s | fetch=%s..%s | "
+        "pending_days=%s | complete=%s | needs_fetch=%s",
+        window.window_start, window.window_end, window.available_end,
+        window.fetch_start, window.fetch_end, window.pending_days,
+        window.is_complete, window.needs_fetch,
     )
 
-    results = await _search_plan(plan, start_date, end_date, company_label)
-    results = await resolve_publish_dates(results)
-    results = order_by_publisher(results)
+    company_label = request.company_name.strip()
 
-    hard_facts, stats = _collect_hard_facts(results, start_date)
+    if window.needs_fetch:
+        plan = await plan_searches(company_label, request.meeting_purpose.strip())
+        logger.info(
+            "Search plan | industry=%s | categories=%s | fundamentals=%s",
+            plan.industry, plan.categories, plan.fundamentals,
+        )
+        fetched = await _search_plan(
+            plan,
+            window.fetch_start.isoformat(),
+            window.fetch_end.isoformat(),
+            company_label,
+            known_urls=known_urls,
+        )
+    else:
+        # Everything up to today is already covered, so reuse what is stored
+        # instead of paying for an identical search.
+        logger.info("Retrieval skipped | coverage already reaches %s", window.available_end)
+        fetched = []
+
+    fetched = await resolve_publish_dates(fetched)
+    fetched = order_by_publisher(fetched)
+
+    hard_facts, analyst_opinions, other_articles, prepared, stats = (
+        await _route_and_collect(
+            fetched, window.window_start.isoformat(), company_label
+        )
+    )
+
+    # Stored evidence was retrieved on an earlier run; it belongs to the same
+    # company and the same window, so it is merged rather than re-fetched.
+    reused = [item for item in (stored_facts or []) if item.publish_date is not None]
+    hard_facts = _merge_reused_facts(reused, hard_facts)
+
+    reused_opinions = [
+        item for item in (stored_opinions or []) if item.publish_date is not None
+    ]
+    analyst_opinions = _merge_reused_facts(reused_opinions, analyst_opinions)
+
+    # Facts about us that appear inside other companies' articles. They are kept
+    # apart from the evidence the model reasons over: they exist so a reader can
+    # follow up, not so the brief can lean on them.
+    incidental, incidental_stats = await harvest_incidental_facts(
+        other_articles,
+        company_label,
+        window.window_start.isoformat(),
+        already_collected=[item.content for item in hard_facts],
+    )
+    if incidental and window.needs_fetch:
+        incidental = await corroborate_incidental_facts(
+            incidental,
+            window.fetch_start.isoformat(),
+            window.fetch_end.isoformat(),
+            company_label,
+            known_urls=known_urls,
+        )
+
+    # Incidental facts were collected against the articles at hand. Now that the
+    # full fact base exists, any of them that repeats something already known is
+    # dropped: a short mention adds nothing once the fuller telling is in hand.
+    if incidental and hard_facts:
+        duplicate_indices = await drop_duplicate_facts(
+            [item.content for item in hard_facts],
+            [item.content for item in incidental],
+        )
+        if duplicate_indices:
+            dropped_set = set(duplicate_indices)
+            incidental = [
+                item
+                for index, item in enumerate(incidental)
+                if index not in dropped_set
+            ]
+            logger.info(
+                "Incidental dedup | dropped=%s | remaining=%s",
+                len(dropped_set),
+                len(incidental),
+            )
 
     fact_base = FactBase(
         company_id=_build_company_id(request.company_name),
         last_refresh_date=datetime.now(timezone.utc),
         hard_facts=hard_facts,
-        analyst_opinions=[],
+        analyst_opinions=analyst_opinions,
         conflicts=[],
+        incidental_facts=incidental,
     )
 
     from .conflict_detection import detect_fact_conflicts
@@ -515,15 +584,49 @@ async def ingest_company_data(request: BriefingRequest) -> FactBase:
 
     logger.info(
         "Ingestion complete | company_id=%s | extracted=%s | skipped=%s | "
-        "duplicate=%s | stale_source=%s | stale_fact=%s | hard_facts=%s | "
-        "conflicts=%s",
+        "duplicate=%s | stale_source=%s | stale_fact=%s | reused=%s | "
+        "hard_facts=%s | analyst_opinions=%s | incidental=%s | conflicts=%s",
         fact_base.company_id,
         stats["extracted"],
         stats["skipped"],
         stats["duplicate"],
         stats["stale_source"],
         stats["stale_fact"],
+        len(reused),
         len(fact_base.hard_facts),
+        len(fact_base.analyst_opinions),
+        len(fact_base.incidental_facts),
         len(fact_base.conflicts),
     )
     return fact_base
+
+
+def _merge_reused_facts(
+    stored: List[FactItem],
+    fresh: List[FactItem],
+) -> List[FactItem]:
+    """Fold previously stored facts into a freshly fetched set.
+
+    Stored facts come first so a run that retrieves nothing at all still
+    produces a usable fact base. Exact duplicates keep the stored entry, and a
+    fresh telling that extends a stored one replaces it.
+    """
+    merged: List[FactItem] = list(stored)
+    normalized = [dedup_key(item.content) for item in merged]
+
+    for item in fresh:
+        key = dedup_key(item.content)
+        if key in normalized:
+            continue
+
+        twin_index = find_prefix_twin(normalized, item.content)
+        if twin_index is not None:
+            merged[twin_index] = item
+            normalized[twin_index] = key
+            continue
+
+        merged.append(item)
+        normalized.append(key)
+
+    return merged
+
