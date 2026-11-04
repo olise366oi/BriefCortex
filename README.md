@@ -22,12 +22,13 @@ Most tools therefore optimize for volume and fluency, not for whether a specific
 Given `{company, meeting_purpose}`, BriefCortex produces a structured `BriefingReport`:
 
 - **Plan-then-search retrieval**: the model decides which queries to run and which publisher categories to hit, constrained to a source registry.
+- **Company identity before retrieval**: the legal-entity registry supplies jurisdiction and legal form, which decides which regulator the legal searches name.
 - **Per-publisher scoping**: 13 domains each get their own path and body-boundary rules, so navigation trees, related-article blocks and paywalls never become facts.
 - **30-day freshness**: both the publication date and the reporting period inside each sentence are checked.
-- **Hard facts only**: commentator framing never reaches the LLM.
+- **Hard facts first**: facts are what the model may turn into leverage; unverified commentary and job postings sit in their own blocks with their own rules.
 - **Executive summary with numeric negotiation asks**, derived only from hard facts — or a directional business read when no objective was supplied.
 - **A deterministic conflict-detection lane** that flags contradictory facts with both sources attached — and is *never* fed into the LLM.
-- **Dual-layer caching** so the second identical request returns in milliseconds.
+- **An exact-request cache** so the same request inside its window returns the stored brief without re-running retrieval or inference.
 
 ---
 
@@ -86,7 +87,7 @@ graph TD
     class Record,FactBase,SaveBrief storeNode
 ```
 
-*(The same diagram lives in `docs/ARCHITECTURE.md` alongside the module responsibilities and design decisions.)*
+*(The diagram is the canonical one; the module map and design decisions below carry the detail.)*
 
 ### 1. Freshness: A 30-Day Window, Checked Twice
 
@@ -132,9 +133,31 @@ No fabrication, no manufactured aggression.
 
 LLM output and conflict detection are two independent tracks by design: semantics cannot override evidence, and evidence cannot be reinterpreted by semantics.
 
-### 6. Cache Status
+### 6. Cache: Two Different Jobs
 
-Not yet wired. `bifrost_headers.py` computes a content-aware cache key and TTL for every LLM call, but no cache store consumes them yet, so a repeated request still re-runs retrieval and inference.
+There are two caches, and they answer different questions.
+
+**Exact-request cache** (`services/cache.py`). A finished brief is keyed on
+company + objective + meeting date. An identical request inside the TTL returns
+the stored brief instead of paying for retrieval and inference again. Meeting
+time is keyed to the day, because the evidence window is anchored to the date —
+two meetings on one day produce the same brief.
+
+**Content-aware TTL headers** (`services/bifrost_headers.py`). When a request
+does reach a model, the evidence decides how long the response may be cached.
+Fact texts are matched against three word-boundary rule sets, so `third quarter`
+is not read as a hiring signal and `shares` does not fire on `shareholders`.
+
+| Class | Signals | TTL |
+|---|---|---|
+| `volatile` | earnings, guidance, stock moves, recalls, lawsuits | 24h |
+| `structural` | hiring, appointments, product launches | 72h |
+| `primary` | annual reports, filings, press releases | 168h |
+
+Classes apply by precedence: a fact set is only as cacheable as its most
+perishable member. The headers (`x-bf-cache-key`, `x-bf-cache-ttl`,
+`x-bf-content-class`) ride on the outgoing request, so the gateway needs no
+source changes.
 
 ### 7. Tested, Not Vibes
 
@@ -165,15 +188,79 @@ BriefCortex/
 │   │   ├── db/               # SQLAlchemy ORM models
 │   │   ├── repositories/     # Data access (Postgres)
 │   │   ├── models/           # Pydantic schemas (briefing report + fact base)
-│   │   ├── services/         # Ingestion, search planning, analysis, conflict detection, cache headers, job orchestration
+│   │   ├── services/         # Retrieval, identity, lanes, analysis, job orchestration
 │   │   └── mock/             # Demo briefing payload
+│   ├── migrations/           # Alembic revisions
 │   └── tests/
-└── docs/                     # ARCHITECTURE, CLAUDE, KARPATHY
+├── docs/                     # CLAUDE, KARPATHY
+└── docker-compose.yml        # Postgres, Bifrost gateway, Redis Stack
 ```
 
 ---
 
-## Local Setup
+## Module Map
+
+### Backend services
+
+| Area | Responsibility |
+|------|----------------|
+| `services/briefing_service.py` | Async job accept, cache lookup, status orchestration, stale-job recovery |
+| `services/ingestion.py` | Retrieval orchestration; assembles facts, opinions, hiring and incidental lanes |
+| `services/search_planner.py` | Model-driven search plan, constrained to a source registry |
+| `services/company_identity.py` | Registry lookup for jurisdiction and legal form (GLEIF) |
+| `services/legal_signals.py` | Jurisdiction-aware searches for legal and regulatory exposure |
+| `services/source_rules.py` | Publisher registry and per-publisher extraction rules |
+| `services/publisher_filter.py` | URL scoping, article-body location, text extraction |
+| `services/fact_extraction.py` | Inverted-pyramid split, dedup, source ordering |
+| `services/freshness.py` | Publication dates, date fallback, reporting-period checks |
+| `services/article_subject.py` | Routes each article by who it is about |
+| `services/sentence_classifier.py` | Fact vs opinion labeling for incidental sentences |
+| `services/incidental*.py` | Facts about us found inside other companies' coverage |
+| `services/corroboration.py` | Targeted follow-up search for an incidental fact |
+| `services/hiring.py` | Careers-page detection and hiring queries |
+| `services/dedup.py` | Two-stage fact merging that keeps every source |
+| `services/retention.py`, `scheduler.py` | Evidence expiry and URL decay, run on a daily loop |
+| `services/cache.py` | Exact-request cache key and TTL |
+| `services/analysis.py` | LLM report generation and prompt assembly |
+| `services/conflict_detection.py` | Deterministic fact conflict engine |
+| `services/bifrost_headers.py` | Content-aware cache key and TTL derived from the evidence |
+| `services/keywords.py`, `urls.py`, `window.py` | Shared matchers, URL parsing, meeting-anchored window |
+| `repositories/` | Postgres data access only |
+| `core/` | Settings, DB engine/session, connection checks |
+
+### Frontend
+
+| Area | Responsibility |
+|------|----------------|
+| `app/` | Next.js App Router pages; `/` redirects to `/briefing` |
+| `src/components/briefing/` | Form, report states, evidence panel, side panel |
+| `src/hooks/briefing/` | Submit, poll, list, select, clone (client-only) |
+| `src/api/` | Axios clients talking to FastAPI |
+| `src/types/`, `src/lib/` | Shared contracts and pure helpers |
+
+---
+
+## Design Decisions
+
+1. **Async accept + poll** — generation takes seconds; `202` + polling keeps the UI responsive without websockets. Jobs are held in a task set so the event loop cannot collect them mid-run, and a job stuck in `processing` is failed on next startup.
+2. **Subject routing, not name matching** — an article that merely names the company is not about the company. Each article is routed by its subject before any fact is trusted, which is what stopped a competitor's reporting being filed as ours.
+3. **Hiring is its own lane** — a posting states intent, not outcome, so it informs the model without being asserted as a reported fact.
+4. **One fact, every source** — the same fact from five outlets is stored once with all five links. Coverage count is not the claim's value.
+5. **Conflict detection stays off the LLM path** — conflicts are computed independently and served beside the report, never inside the prompt.
+6. **Postgres + repository** — each briefing is a row keyed by UUID; the report lives in one JSONB column.
+7. **One configuration channel** — every key is read through `app/core/config.py`, and the `.env` path is resolved against the module.
+8. **Schema changes go through Alembic** — `init_db()` only checks connectivity and warns when the revision is behind; it never alters tables.
+
+## Anti-patterns
+
+- Do not call FastAPI directly from React components — go through `src/api/`.
+- Do not put business logic in route handlers — keep it in services.
+- Do not put SQL in services — go through repositories.
+- Do not feed conflict-detection output into the LLM prompt.
+- Do not let unverified commentary become a numeric ask in `executive_summary.recommendation`.
+- Do not gate an article on whether the company name appears; ask what the article is about.
+
+---
 
 ### Backend
 

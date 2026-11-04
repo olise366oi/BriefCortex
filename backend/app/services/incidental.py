@@ -116,10 +116,69 @@ def article_subject_mentions(clean_text: str, company: str) -> int:
     return company_name_hits(clean_text, company)
 
 
+# Page chrome that sits above the article body and carries no subject signal.
+# Seen across publishers: release timestamps, datelines from the wire service,
+# source attributions, distributor names and markdown table/list fragments.
+CHROME_LINE_PATTERNS = (
+    re.compile(r"^\s*[A-Z][a-z]{2}\s+\d{1,2},\s+20\d{2}(,\s*\d{1,2}:\d{2}\s*(ET|GMT|UTC)?)?\s*$", re.IGNORECASE),
+    re.compile(r"^\s*\|\s*source\s*:", re.IGNORECASE),
+    re.compile(r"^\s*source\s*:", re.IGNORECASE),
+    re.compile(r"^\s*cnw\s*group\s*$", re.IGNORECASE),
+    re.compile(r"^\s*(pr|globe|business)\s*newswire\s*$", re.IGNORECASE),
+    re.compile(r"^\s*[A-Z][A-Za-z.\s&'-]{0,40}\s*/\s*(PR|Globe|Business)?Newswire\s*/\s*$", re.IGNORECASE),
+    re.compile(r"^\s*\d{1,2}:\d{2}\s*(AM|PM)?\s*(ET|GMT|UTC)\s*$", re.IGNORECASE),
+    re.compile(r"^\s*research and markets\s*$", re.IGNORECASE),
+    re.compile(r"^\s*delveinsight[^.]*\s*$", re.IGNORECASE),
+)
+
+# A wire-service marker embedded in the prose line: "(PRNewswire/)" or
+# "/PRNewswire/ --". Kept as chrome because it names the distributor, not the
+# story. Replaced by a single space so the surrounding words stay separate.
+WIRE_TAG_RE = re.compile(
+    r"(?:\(|/)?\s*(?:PR|Globe|Business)?Newswire\s*/?\)?\s*(?:--|—|–)?",
+    re.IGNORECASE,
+)
+
+# A real opening sentence is at least this long; anything shorter is a label,
+# a ticker line or a fragment rather than prose.
+MIN_OPENING_CHARS = 40
+
+
+def is_chrome_line(line: str) -> bool:
+    """True when a line is page furniture rather than article prose."""
+    stripped = line.strip()
+    if not stripped:
+        return True
+    if stripped.startswith(("|", "![")):
+        return True
+    return any(pattern.match(stripped) for pattern in CHROME_LINE_PATTERNS)
+
+
 def opening_sentence(clean_text: str) -> str:
-    """Return the first sentence of the article, for subject classification."""
+    """Return the article's first real sentence, for subject classification.
+
+    Publishers put a release timestamp, a wire-service dateline, a distributor
+    name or a source attribution above the body. Passing that text to the
+    subject classifier makes every article look like it is about someone else:
+    measured on a live run, one file opened with "CNW Group" and another with
+    "Assertio also today announced", which routed seven of seven articles away
+    from their real subject. Furniture is therefore skipped until prose begins.
+    """
+    if not clean_text:
+        return ""
+
     for paragraph in re.split(r"\n\s*\n", clean_text):
-        paragraph = paragraph.strip()
-        if paragraph:
-            return first_sentence(paragraph)
+        for line in paragraph.splitlines():
+            line = line.strip()
+            if is_chrome_line(line):
+                continue
+            if len(line) < MIN_OPENING_CHARS:
+                continue
+            # Drop a leading wire-service tag inside the prose line, so the
+            # opening reads as the article and not as its distribution stamp.
+            line = re.sub(r"\s+", " ", WIRE_TAG_RE.sub(" ", line)).strip(" -")
+            if len(line) < MIN_OPENING_CHARS:
+                continue
+            return first_sentence(line)
+
     return ""

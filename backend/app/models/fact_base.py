@@ -68,6 +68,9 @@ class FactBase(BaseModel):
     last_refresh_date: datetime
     hard_facts: List[FactItem]
     analyst_opinions: List[FactItem]
+    # Job postings, kept apart from reported facts: they signal intent rather
+    # than asserting an outcome, and the model reads them as a separate block.
+    hiring: List[FactItem] = []
     conflicts: List[dict] = []
     # Not evidence: a reading list for the human, isolated from the model path.
     incidental_facts: List[IncidentalFact] = []

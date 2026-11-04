@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
 from sqlalchemy import delete, select, update
@@ -21,6 +21,7 @@ from app.services.retention import (
     is_hidden_from_hot_set,
     should_delete_fact,
 )
+from app.models.briefing import BriefingJobStatus
 
 
 def _to_date(value: datetime) -> date:
@@ -69,6 +70,37 @@ class BriefingRepository:
     def list_by_status(self, status: str) -> list[BriefingRecord]:
         stmt = select(BriefingRecord).where(BriefingRecord.status == status)
         return list(self.db.scalars(stmt).all())
+
+    def find_cached(
+        self,
+        company_name: str,
+        meeting_purpose: str,
+        meeting_time: datetime,
+    ) -> Optional[BriefingRecord]:
+        """Return a completed brief for the same request, if one exists.
+
+        Matching is on the request fields themselves rather than a stored hash,
+        so the cache stays correct when the schema changes. Meeting time is
+        compared by day: the evidence window is anchored to the date, so two
+        meetings on the same day produce the same brief.
+        """
+        day = meeting_time.astimezone(timezone.utc).date() if meeting_time.tzinfo else meeting_time.date()
+        start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+        end = start + timedelta(days=1)
+
+        stmt = (
+            select(BriefingRecord)
+            .where(
+                BriefingRecord.company_name == company_name,
+                BriefingRecord.meeting_purpose == meeting_purpose,
+                BriefingRecord.status == BriefingJobStatus.COMPLETED.value,
+                BriefingRecord.meeting_time >= start,
+                BriefingRecord.meeting_time < end,
+            )
+            .order_by(BriefingRecord.created_at.desc())
+            .limit(1)
+        )
+        return self.db.scalars(stmt).first()
 
     def update(
         self,

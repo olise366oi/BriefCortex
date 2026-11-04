@@ -40,16 +40,38 @@ SOURCE_PRIORITY = (
 DEDUP_MIN_SHARED_CHARS = 80
 
 
+# Abbreviations whose trailing period is not a sentence end. A dateline such as
+# "AHMEDABAD, India, Oct. 12, 2026" is one sentence, not three.
+SENTENCE_END_EXCEPTIONS = (
+    "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "inc", "ltd", "co", "corp",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct",
+    "nov", "dec", "st", "no", "vs", "approx", "dept", "est", "pty", "plc",
+)
+
+
+def _is_abbreviation(before: str) -> bool:
+    """True when the word before a period is a known abbreviation."""
+    word = before.rsplit(" ", 1)[-1].strip().lower()
+    return word in SENTENCE_END_EXCEPTIONS
+
+
 def first_sentence(paragraph: str) -> str:
-    """Return the first sentence of a paragraph without semantic rewriting."""
+    """Return the first sentence of a paragraph without semantic rewriting.
+
+    A period only ends a sentence when the word before it is not a known
+    abbreviation, so a dateline ("AHMEDABAD, India, Oct. 12, 2026") stays whole
+    instead of being cut to its third word.
+    """
     paragraph = paragraph.strip()
     if not paragraph:
         return ""
 
-    parts = re.split(r"(?<=[.!?])\s+", paragraph, maxsplit=1)
-    first = parts[0].strip() if parts else paragraph
+    for match in re.finditer(r"[.!?]\s+", paragraph):
+        if _is_abbreviation(paragraph[: match.start()]):
+            continue
+        return paragraph[: match.start() + 1].strip()
 
-    return first or paragraph
+    return paragraph
 
 
 def has_negative_signal(text: str) -> bool:

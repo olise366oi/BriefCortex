@@ -28,6 +28,7 @@ from app.models.briefing import (
 from app.models.fact_base import FactBase, FactItem
 from app.repositories.briefing_repository import BriefingRepository, EvidenceRepository
 from app.services.analysis import generate_briefing_report
+from app.services.cache import DEFAULT_TTL_HOURS as CACHE_TTL_HOURS
 from app.services.ingestion import _build_company_id, ingest_company_data
 from app.services.logger_service import get_logger
 from app.services.window import compute_evidence_window
@@ -163,6 +164,7 @@ def _build_evidence_summary(fact_base: FactBase) -> EvidenceSummary:
         hard_fact_count=len(fact_base.hard_facts),
         opinion_count=len(fact_base.analyst_opinions),
         conflict_count=len(fact_base.conflicts),
+        hiring_count=len(fact_base.hiring),
         conflicts=[
             EvidenceConflict(
                 conflict_type=str(conflict.get("conflict_type", "")),
@@ -191,6 +193,15 @@ def _build_evidence_summary(fact_base: FactBase) -> EvidenceSummary:
                 also_reported_by=list(item.also_reported_by),
             )
             for item in fact_base.analyst_opinions
+        ],
+        hiring=[
+            EvidenceItem(
+                content=item.content,
+                source_url=str(item.source_url),
+                publish_date=item.publish_date,
+                also_reported_by=list(item.also_reported_by),
+            )
+            for item in fact_base.hiring
         ],
         incidental_facts=[
             IncidentalItem(
@@ -310,15 +321,44 @@ async def create_briefing(db: Session, request: BriefingRequest) -> uuid.UUID:
     settings = get_settings()
     repo = BriefingRepository(db)
 
+    company = request.company_name.strip()
+    purpose = request.meeting_purpose.strip()
+
+    # An identical request inside the TTL is already answered. Reuse that
+    # record instead of paying for retrieval and inference again; the poll
+    # endpoint serves it directly because its status is already completed.
+    cached = repo.find_cached(company, purpose, request.meeting_time)
+    if cached is not None and _is_fresh(cached):
+        logger.info(
+            "Request served from cache | id=%s | company=%r | purpose=%r",
+            cached.id,
+            company,
+            purpose,
+        )
+        return cached.id
+
     record = repo.create(
-        company_name=request.company_name.strip(),
+        company_name=company,
         meeting_time=request.meeting_time,
-        meeting_purpose=request.meeting_purpose.strip(),
+        meeting_purpose=purpose,
         status=BriefingJobStatus.PENDING.value,
     )
 
     _spawn_job(record.id, settings)
     return record.id
+
+
+def _is_fresh(record: BriefingRecord) -> bool:
+    """True when a completed record is still inside the cache TTL."""
+    created = record.created_at
+    if created is None:
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    age_hours = (
+        datetime.now(timezone.utc) - created
+    ).total_seconds() / 3600
+    return age_hours < CACHE_TTL_HOURS
 
 
 def list_briefings(db: Session) -> BriefingListResponse:

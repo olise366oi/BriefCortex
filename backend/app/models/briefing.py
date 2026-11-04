@@ -108,11 +108,14 @@ class EvidenceSummary(BaseModel):
     hard_fact_count: int = 0
     opinion_count: int = 0
     conflict_count: int = 0
+    hiring_count: int = 0
     conflicts: List[EvidenceConflict] = Field(default_factory=list)
     # The facts behind the brief. Each is stored once however many outlets
     # reported it, with the other outlets listed beside it.
     hard_facts: List[EvidenceItem] = Field(default_factory=list)
     analyst_opinions: List[EvidenceItem] = Field(default_factory=list)
+    # Role postings: intent rather than outcome, listed separately.
+    hiring: List[EvidenceItem] = Field(default_factory=list)
     incidental_facts: List[IncidentalItem] = Field(default_factory=list)
 
 
