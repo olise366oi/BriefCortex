@@ -102,6 +102,18 @@ class IncidentalItem(BaseModel):
     article_subject: Optional[str] = None
 
 
+class CoverageItem(BaseModel):
+    """Retrieval coverage, delivered so a reader knows how thin the evidence is."""
+
+    level: str = "none"
+    total_facts: int = 0
+    distinct_sources: int = 0
+    can_support_leverage: bool = False
+    lanes_missing: List[str] = Field(default_factory=list)
+    notes: List[str] = Field(default_factory=list)
+    checks_to_run: List[str] = Field(default_factory=list)
+
+
 class EvidenceSummary(BaseModel):
     """What the brief was built on, exposed so the UI can show its provenance."""
 
@@ -117,6 +129,8 @@ class EvidenceSummary(BaseModel):
     # Role postings: intent rather than outcome, listed separately.
     hiring: List[EvidenceItem] = Field(default_factory=list)
     incidental_facts: List[IncidentalItem] = Field(default_factory=list)
+    # How much was actually retrieved, and what the reader must check themselves.
+    coverage: Optional[CoverageItem] = None
 
 
 class BriefingStatusResponse(BaseModel):

@@ -30,12 +30,19 @@ class BriefingGenerationError(Exception):
 
 SYSTEM_PROMPT = """You are a ruthless, highly aggressive Wall Street M&A and negotiation strategist. You brief the deal team before a high-stakes commercial meeting. No pleasantries, no hedging, no generic consulting language. Turn the meeting purpose and available evidence into cold, specific negotiation leverage and concrete asks.
 
-INPUTS (exactly these four blocks, no others):
+INPUTS (exactly these five blocks, no others):
 <MEETING_PURPOSE> the commercial objective of the meeting. It may be "(none supplied)".
 <HARD_FACTS> verified factual evidence. This is the ONLY source of negotiation leverage.
 <ANALYST_OPINIONS> unverified analyst commentary and rumors. Treat as leads to verify, never as facts.
 <HIRING> current job postings at the company. These signal intent, not outcome: read them to infer where people and budget are moving, never quote them as a reported fact.
+<COVERAGE> how much evidence was actually retrieved, and which lanes came back empty. This is a statement about our coverage, not about the company.
 The output fields news/hires/launches/open_questions/risks must be produced by classifying and summarizing ANALYST_OPINIONS, HARD_FACTS and HIRING. Do not assume any input block named NEWS, HIRES, LAUNCHES, OPEN_QUESTIONS, or RISKS exists.
+
+COVERAGE HONESTY (applies in every mode):
+- "No reporting found" is not the same as "no problems found". Never let a thin or empty evidence set read as reassurance.
+- When COVERAGE level is "none" or "thin", executive_summary.confidence must say plainly that coverage was insufficient and name what could not be checked.
+- When COVERAGE can_support_numeric_leverage is false, do not emit numeric asks even if a purpose was supplied: state that the evidence cannot price the demand and say what is missing.
+- Never describe an unchecked area as clean. Say "not checked" instead of implying it was verified.
 
 OUTPUT STYLE:
 - One pass, not a catalogue. The brief is a single coherent read of the company, so do not manufacture one observation per input item and do not restate the evidence item by item.
@@ -109,6 +116,18 @@ def _format_fact_base_for_prompt(fact_base: FactBase) -> str:
     for i, item in enumerate(fact_base.hiring, 1):
         lines.append(f"[J{i}] ({str(item.source_url)}) {item.content}")
     lines.append("</HIRING>")
+
+    lines.append("<COVERAGE>")
+    coverage = fact_base.coverage
+    lines.append(f"level: {coverage.level}")
+    lines.append(f"facts collected: {coverage.total_facts}")
+    lines.append(f"distinct sources: {coverage.distinct_sources}")
+    lines.append(f"can support numeric leverage: {coverage.can_support_leverage}")
+    if coverage.lanes_missing:
+        lines.append(f"lanes that returned nothing: {', '.join(coverage.lanes_missing)}")
+    for note in coverage.notes:
+        lines.append(f"note: {note}")
+    lines.append("</COVERAGE>")
 
     return "\n".join(lines)
 

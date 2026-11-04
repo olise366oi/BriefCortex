@@ -20,6 +20,7 @@ from app.models.briefing import (
     BriefingReport,
     BriefingRequest,
     BriefingStatusResponse,
+    CoverageItem,
     EvidenceConflict,
     EvidenceItem,
     EvidenceSummary,
@@ -160,11 +161,21 @@ async def _generate_live_report(
 
 def _build_evidence_summary(fact_base: FactBase) -> EvidenceSummary:
     """Describe what the brief was built on, without touching the report."""
+    coverage = fact_base.coverage
     return EvidenceSummary(
         hard_fact_count=len(fact_base.hard_facts),
         opinion_count=len(fact_base.analyst_opinions),
         conflict_count=len(fact_base.conflicts),
         hiring_count=len(fact_base.hiring),
+        coverage=CoverageItem(
+            level=coverage.level,
+            total_facts=coverage.total_facts,
+            distinct_sources=coverage.distinct_sources,
+            can_support_leverage=coverage.can_support_leverage,
+            lanes_missing=list(coverage.lanes_missing),
+            notes=list(coverage.notes),
+            checks_to_run=list(coverage.checks_to_run),
+        ),
         conflicts=[
             EvidenceConflict(
                 conflict_type=str(conflict.get("conflict_type", "")),

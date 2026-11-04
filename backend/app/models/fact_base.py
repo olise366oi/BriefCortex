@@ -61,6 +61,23 @@ class IncidentalFact(BaseModel):
         return sources
 
 
+class CoverageRecord(BaseModel):
+    """How much the retrieval actually reached, carried alongside the facts.
+
+    Delivered to the reader as well as the model: a brief that says "thin
+    coverage" is honest, while the same brief presented without that label
+    reads as "nothing to worry about".
+    """
+
+    level: str = "none"
+    total_facts: int = 0
+    distinct_sources: int = 0
+    can_support_leverage: bool = False
+    lanes_missing: List[str] = []
+    notes: List[str] = []
+    checks_to_run: List[str] = []
+
+
 class FactBase(BaseModel):
     """Core output of the ingestion layer."""
 
@@ -74,3 +91,5 @@ class FactBase(BaseModel):
     conflicts: List[dict] = []
     # Not evidence: a reading list for the human, isolated from the model path.
     incidental_facts: List[IncidentalFact] = []
+    # What retrieval did and did not reach, plus the checks left to the reader.
+    coverage: CoverageRecord = CoverageRecord()

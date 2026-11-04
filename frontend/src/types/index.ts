@@ -17,3 +17,11 @@ export type {
   ExecutiveSummary,
   IncidentalItem,
 } from "./briefing";
+
+export type {
+  DebugCoverage,
+  DebugFact,
+  DebugIdentity,
+  DebugRunRequest,
+  DebugRunResponse,
+} from "./debug";

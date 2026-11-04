@@ -29,6 +29,7 @@ Given `{company, meeting_purpose}`, BriefCortex produces a structured `BriefingR
 - **Executive summary with numeric negotiation asks**, derived only from hard facts — or a directional business read when no objective was supplied.
 - **A deterministic conflict-detection lane** that flags contradictory facts with both sources attached — and is *never* fed into the LLM.
 - **An exact-request cache** so the same request inside its window returns the stored brief without re-running retrieval or inference.
+- **A coverage ledger** that reports what retrieval actually reached — and, when it reached almost nothing, says so instead of letting an empty result read as a clean one.
 
 ---
 
@@ -304,13 +305,55 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 113 passed.
+Expected: 174 passed.
 
 > Test count is maintained locally while the frontend suite is still being
 > written; the shared baseline will be the sum of this backend count and whatever
 > the frontend contributes.
 
 > Note: on Python 3.15 the Tsinghua mirror does not ship a `pytest` wheel. Install from the official index: `pip install pytest --index-url https://pypi.org/simple`.
+
+---
+
+## Limitations
+
+This is a deliberately honest section. BriefCortex reads the open web; it is not
+a database of companies, and it cannot manufacture coverage that does not exist.
+Knowing where it stops is part of using it safely.
+
+### What it cannot do
+
+| Limitation | Why | What the product does about it |
+|---|---|---|
+| **Small and private companies are mostly invisible** | A private manufacturer with no press coverage, no filings and no listing produces no articles. There is nothing to retrieve. | The coverage ledger reports `level: none` and states that an empty result is a statement about coverage, not about the company. |
+| **No jurisdiction-specific registry is integrated** | Registries such as Malaysia's SSM, India's MCA or Italy's Registro Imprese are gated behind local identity, fees or captchas. Wiring each one in would cost more than it returns. | Identity comes from the free GLEIF LEI index when the entity has one; otherwise the brief says identity was unresolved and lists what to check manually. |
+| **Legal exposure is inferred from coverage, not from filings** | Regulator portals are not reachable programmatically. | Legal searches run jurisdiction-aware queries and are marked as leads, never as verified findings. |
+| **Non-English coverage is under-represented** | Publishers, queries and cleansing rules are built for English-language financial press. | The gap is visible in the lane counts rather than hidden: a company covered only in local-language press will look thin. |
+| **A thin brief cannot be turned into numbers** | There is no defensible price, term or volume to ask for when the fact base is nearly empty. | When `coverage.can_support_leverage` is false the model is instructed to withhold numeric asks and say what is missing, even if a meeting objective was supplied. |
+| **Cost bounds coverage** | Every run pays for retrieval and inference. | The exact-request cache removes repeated cost; the search budget caps a single run. |
+
+### The rule that matters
+
+> **"No reporting found" is not the same as "no problems found."**
+
+Those two statements are opposite and only one of them is safe to act on. The
+`coverage` block exists to keep them apart: it names the coverage level, which
+lanes returned nothing, and the checks a reader should run before signing.
+
+When coverage is thin, the brief ships with a checklist instead of a verdict:
+
+- Company registration status and legal form, from the local registry
+- Litigation, insolvency or winding-up record in the jurisdiction
+- Sanctions and export-control screening for the entity and its owners
+- Latest filed accounts or audited financial statements
+- Beneficial ownership and any state or group affiliation
+
+### Scope it is designed for
+
+BriefCortex is built for **companies that are written about**: listed groups,
+regulated industries, and firms large enough to have press coverage in the last
+30 days. For a small counterparty the honest output is the coverage ledger and
+the checklist, not a negotiation strategy.
 
 ---
 
