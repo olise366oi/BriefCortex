@@ -70,6 +70,35 @@ def test_careers_urls_are_recognized():
     assert is_careers_url("https://example.com/vacancies/123") is True
 
 
+def test_careers_url_spellings_vary_by_publisher():
+    # Measured: nine careers URLs came back for one company and the narrower
+    # patterns matched only five, which left the hiring lane empty.
+    spellings = (
+        "https://zyduslife.com/career.html",
+        "https://zydushospitals.com/jobs-career",
+        "https://www.zydushealthcare.com/career-vacancies",
+        "https://www.indeed.com/cmp/Zydus-Pharmaceuticals",
+        "https://www.glassdoor.com/Jobs/Zydus-Lifesciences-Jobs-E345926.htm",
+        "https://recruiting.paylocity.com/recruiting/jobs/All/25dc",
+    )
+    for url in spellings:
+        assert is_careers_url(url) is True, url
+
+
 def test_article_urls_are_not_careers_urls():
     assert is_careers_url("https://www.reuters.com/business/zydus-earnings") is False
     assert is_careers_url("https://www.moneycontrol.com/news/market-week-ahead") is False
+    assert is_careers_url("https://www.forbes.com/companies/zydus") is False
+
+
+def test_article_slugs_mentioning_jobs_are_not_careers_urls():
+    # Measured: nine page fetches per run were spent on these, because a loose
+    # "contains /jobs" test matched the slug of a news story.
+    articles = (
+        "https://crypto.news/crypto-week-ahead-bitcoin-us-midterms-jobs-data-fed",
+        "https://www.cnbc.com/2026/10/30/jim-cramer-week-ahead-apple-amd-jobs-report.html",
+        "https://www.biospace.com/job-trends/eyepoint-will-halve-workforce",
+        "https://finance.yahoo.com/markets/stocks/articles/apple-earnings-midterms-jobs-data-110531218.html",
+    )
+    for url in articles:
+        assert is_careers_url(url) is False, url

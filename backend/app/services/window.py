@@ -27,6 +27,11 @@ class EvidenceWindow:
     brief is about the 30 days *before the meeting*. A meeting six days out
     therefore already has 24 days of evidence available; the remaining 6 days
     can only be fetched once they have happened.
+
+    A meeting far enough out that its window has not started yet is read
+    *preliminarily*: the most recent 30 days are fetched instead of returning
+    nothing. A meeting 40 days away would otherwise produce an empty brief and
+    report "no coverage", when the reader simply wanted today's picture.
     """
 
     window_start: date
@@ -36,6 +41,9 @@ class EvidenceWindow:
     fetch_end: date
     needs_fetch: bool
     is_complete: bool
+    # True when the fetched slice is the latest 30 days rather than the 30 days
+    # before the meeting, because that window has not begun yet.
+    preliminary: bool = False
 
     @property
     def has_gap(self) -> bool:
@@ -73,11 +81,22 @@ def compute_evidence_window(
     # The window holds WINDOW_DAYS calendar dates ending on the meeting day, so
     # a meeting six days out leaves exactly 24 observable dates.
     window_end = meeting_date
-    window_start = meeting_date - timedelta(days=WINDOW_DAYS - 1)
+    intended_start = meeting_date - timedelta(days=WINDOW_DAYS - 1)
 
     # Evidence cannot exist after today, and the brief never looks past the
     # meeting, so the observable end is whichever comes first.
     available_end = min(today_date, meeting_date)
+
+    # A meeting more than WINDOW_DAYS out has a window that starts in the future,
+    # so it holds no evidence at all. Reading the latest 30 days keeps a run
+    # useful and is labelled preliminary, rather than looking like a company
+    # nobody writes about.
+    preliminary = intended_start > available_end
+    window_start = (
+        today_date - timedelta(days=WINDOW_DAYS - 1)
+        if preliminary
+        else intended_start
+    )
 
     fetch_start = window_start
     if coverage_end is not None:
@@ -98,4 +117,5 @@ def compute_evidence_window(
         fetch_end=available_end,
         needs_fetch=needs_fetch,
         is_complete=available_end >= window_end,
+        preliminary=preliminary,
     )

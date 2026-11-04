@@ -3,25 +3,26 @@
 import { useState } from "react";
 
 import { runDebug } from "@/api/debug";
-import type { DebugRunResponse } from "@/types";
+import type { DebugIdentityCandidate, DebugRunResponse } from "@/types";
 
 /**
  * Temporary console for watching a run while the pipeline is being built.
  *
  * It submits a company, waits for the full trace, and prints everything the
- * pipeline decided: identity match, per-lane counts, coverage verdict, and the
- * report. Not linked from the app; delete it once the report view carries the
- * same detail.
+ * pipeline decided: identity match, per-lane counts, coverage verdict, window,
+ * and the report. Not linked from the app; delete it once the report view
+ * carries the same detail.
  */
 export function DebugConsole() {
   const [company, setCompany] = useState("Zydus Lifesciences");
   const [purpose, setPurpose] = useState("");
-  const [days, setDays] = useState("6");
+  const [meetingTime, setMeetingTime] = useState(defaultMeetingTime());
+  const [jurisdiction, setJurisdiction] = useState<string | null>(null);
   const [result, setResult] = useState<DebugRunResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
 
-  async function handleRun() {
+  async function handleRun(chosenJurisdiction: string | null = jurisdiction) {
     if (!company.trim()) {
       setError("Company name is required.");
       return;
@@ -34,15 +35,22 @@ export function DebugConsole() {
       const payload = await runDebug({
         company_name: company.trim(),
         meeting_purpose: purpose.trim(),
-        meeting_in_days: Number(days) || 0,
+        // The backend takes a meeting date, not a day count: this console simply
+        // defaults it to six days ahead.
+        meeting_time: toIso(meetingTime),
+        jurisdiction: chosenJurisdiction ?? undefined,
       });
       setResult(payload);
+      setJurisdiction(chosenJurisdiction);
     } catch {
       setError("Request failed. Check the backend log.");
     } finally {
       setRunning(false);
     }
   }
+
+  const candidates = result?.identity_candidates ?? [];
+  const needsChoice = Boolean(result?.needs_disambiguation) && candidates.length > 0;
 
   return (
     <div className="min-h-screen bg-slate-100 p-6 font-mono text-[13px] text-slate-800">
@@ -60,19 +68,22 @@ export function DebugConsole() {
             className="min-w-[220px] flex-1 rounded border border-slate-300 px-3 py-2"
             placeholder="company name"
             value={company}
-            onChange={(event) => setCompany(event.target.value)}
+            onChange={(event) => {
+              setCompany(event.target.value);
+              setJurisdiction(null);
+            }}
           />
           <input
-            className="min-w-[220px] flex-1 rounded border border-slate-300 px-3 py-2"
+            className="min-w-[200px] flex-1 rounded border border-slate-300 px-3 py-2"
             placeholder="meeting purpose (optional)"
             value={purpose}
             onChange={(event) => setPurpose(event.target.value)}
           />
           <input
-            className="w-24 rounded border border-slate-300 px-3 py-2"
-            placeholder="days"
-            value={days}
-            onChange={(event) => setDays(event.target.value)}
+            className="rounded border border-slate-300 px-3 py-2"
+            type="datetime-local"
+            value={meetingTime}
+            onChange={(event) => setMeetingTime(event.target.value)}
           />
           <button
             className="rounded bg-slate-800 px-5 py-2 text-white disabled:opacity-50"
@@ -91,6 +102,32 @@ export function DebugConsole() {
 
         {error ? <p className="text-red-600">{error}</p> : null}
 
+        {needsChoice ? (
+          <Block title="Which company did you mean?">
+            <p className="text-slate-600">
+              The name matched more than one registered entity. Pick the one you
+              mean, then run again.
+            </p>
+            <div className="mt-2 flex flex-col gap-2">
+              {candidates.map((candidate) => (
+                <button
+                  className="rounded border border-slate-300 bg-white px-3 py-2 text-left hover:border-slate-500"
+                  disabled={running}
+                  key={`${candidate.name}-${candidate.jurisdiction}`}
+                  onClick={() => void handleRun(candidate.jurisdiction ?? null)}
+                  type="button"
+                >
+                  <span className="font-bold">{candidate.name}</span>
+                  <span className="ml-2 text-slate-500">
+                    {candidate.jurisdiction ?? "?"} · {candidate.status ?? "?"} ·
+                    score {candidate.confidence.toFixed(2)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </Block>
+        ) : null}
+
         {result ? (
           <div className="space-y-5">
             <Block title="Counts">
@@ -103,6 +140,15 @@ export function DebugConsole() {
 
             <Block title="Identity">
               <pre className="whitespace-pre-wrap">{formatJson(result.identity)}</pre>
+              {candidates.length > 0 ? (
+                <pre className="mt-2 whitespace-pre-wrap text-slate-500">
+                  candidates: {formatJson(candidates)}
+                </pre>
+              ) : null}
+            </Block>
+
+            <Block title="Evidence window">
+              <pre className="whitespace-pre-wrap">{formatJson(result.window)}</pre>
             </Block>
 
             <Block title={`Coverage (${result.coverage?.level ?? "none"})`}>
@@ -139,6 +185,19 @@ export function DebugConsole() {
       </div>
     </div>
   );
+}
+
+function defaultMeetingTime(): string {
+  const date = new Date();
+  date.setDate(date.getDate() + 6);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function toIso(localValue: string): string | undefined {
+  const date = new Date(localValue);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return date.toISOString();
 }
 
 function FactLane({

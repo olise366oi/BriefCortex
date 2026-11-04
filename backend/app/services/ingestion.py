@@ -27,12 +27,18 @@ from app.services.freshness import (
     resolve_publish_dates,
 )
 from app.services.article_subject import classify_article_subjects
-from app.services.company_identity import resolve_identity
+from app.services.company_identity import (
+    disambiguate_with_model,
+    needs_caller_choice,
+    rank_candidates,
+    resolve_identity,
+)
 from app.services.coverage import build_coverage_report
 from app.services.corroboration import corroborate_incidental_facts
 from app.services.dedup import drop_duplicate_facts, merge_duplicate_facts
 from app.services.hiring import hiring_queries, is_careers_url, is_hiring_line
 from app.services.incidental import opening_sentence
+from app.services.job_postings import JobPosting, postings_from_url
 from app.services.keywords import match_word
 from app.services.urls import host_of
 from app.services.incidental_harvest import harvest_incidental_facts
@@ -334,19 +340,49 @@ async def _route_and_collect(
     wrong.
     """
     prepared: List[dict] = []
-    postings: List[dict] = []
+    postings_entries: List[dict] = []
+
+    # Careers pages need the page's structured markup, which the searched body
+    # does not contain: it is a JavaScript shell. They are fetched directly and
+    # in parallel, so a board listing cannot stall the run.
+    careers_entries: List[dict] = []
     for result in results:
         if not isinstance(result, dict):
             continue
         url = str(result.get("url") or "")
+        if not url:
+            continue
+        if is_careers_url(url):
+            careers_entries.append(
+                {
+                    "result": result,
+                    "url": url,
+                    "clean_text": extract_clean_text(result.get("raw_content"), url) or "",
+                }
+            )
+
+    if careers_entries:
+        fetched = await asyncio.gather(
+            *[asyncio.to_thread(postings_from_url, entry["url"]) for entry in careers_entries]
+        )
+        for entry, postings_found in zip(careers_entries, fetched):
+            entry["postings"] = postings_found
+            if postings_found:
+                postings_entries.append(entry)
+            elif entry["clean_text"]:
+                # No structured data, but the page does carry readable text.
+                postings_entries.append(entry)
+
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        url = str(result.get("url") or "")
+        if is_careers_url(url):
+            continue
         clean_text = extract_clean_text(result.get("raw_content"), url)
         if not clean_text:
             continue
-        entry = {"result": result, "url": url, "clean_text": clean_text}
-        if is_careers_url(url):
-            postings.append(entry)
-        else:
-            prepared.append(entry)
+        prepared.append({"result": result, "url": url, "clean_text": clean_text})
 
     routes = await classify_article_subjects(
         [opening_sentence(item["clean_text"]) for item in prepared],
@@ -372,7 +408,7 @@ async def _route_and_collect(
             other_articles.append(entry)
 
     hard_facts, analyst_opinions, hiring_items, stats = _collect_hard_facts(
-        own_articles + postings, window_start
+        own_articles + postings_entries, window_start
     )
     return hard_facts, analyst_opinions, hiring_items, other_articles, prepared, stats
 
@@ -412,18 +448,28 @@ def _collect_hard_facts(
         )
         clean_text = article["clean_text"]
 
-        # A careers page is not a news article. Keep its text as hiring signal
-        # instead of mining it for facts, so role clusters stay legible to the
-        # model without being asserted as outcomes.
+        # A careers page is not a news article. Its openings are read from the
+        # page's own schema.org markup, because the HTML a crawler receives is a
+        # JavaScript shell with no roles in it. Text extraction is the fallback
+        # for pages that do publish their listings as prose.
         if is_careers_url(source_url):
-            posting_facts, posting_stats = _collect_posting(
-                clean_text, source_url, publish_date, window_start
-            )
+            postings = article.get("postings") or []
+            if postings:
+                posting_facts = _posting_items(postings, source_url, publish_date)
+                stats["hiring_sources"] += 1
+            else:
+                posting_facts, posting_stats = _collect_posting(
+                    clean_text, source_url, publish_date, window_start
+                )
+                stats["hiring_sources"] += posting_stats["hiring_sources"]
+                stats["stale_fact"] += posting_stats["stale_fact"]
+
             hiring_items.extend(posting_facts)
-            stats["hiring_sources"] += posting_stats["hiring_sources"]
-            stats["stale_fact"] += posting_stats["stale_fact"]
             logger.info(
-                "Posting source | url=%s | roles_listed=%s", source_url, len(posting_facts)
+                "Posting source | url=%s | roles_listed=%s | via=%s",
+                source_url,
+                len(posting_facts),
+                "structured data" if postings else "page text",
             )
             continue
 
@@ -510,6 +556,20 @@ def _collect_hard_facts(
     return hard_facts, analyst_opinions, hiring_items, stats
 
 
+def _posting_items(
+    postings: List["JobPosting"],
+    source_url: str,
+    publish_date: Optional[datetime],
+) -> List[FactItem]:
+    """Turn structured postings into hiring items, one line each."""
+    items: List[FactItem] = []
+    for posting in postings:
+        item = _build_fact_item(posting.to_line(), source_url, publish_date)
+        if item is not None:
+            items.append(item)
+    return items
+
+
 def _collect_posting(
     clean_text: str,
     source_url: str,
@@ -562,6 +622,7 @@ async def ingest_company_data(
     stored_facts: Optional[List[FactItem]] = None,
     stored_opinions: Optional[List[FactItem]] = None,
     known_urls: Optional[set] = None,
+    preferred_jurisdiction: Optional[str] = None,
 ) -> FactBase:
     """Ingest company data and return a validated FactBase.
 
@@ -585,10 +646,10 @@ async def ingest_company_data(
     )
     logger.info(
         "Evidence window | window=%s..%s | observable_to=%s | fetch=%s..%s | "
-        "pending_days=%s | complete=%s | needs_fetch=%s",
+        "pending_days=%s | complete=%s | needs_fetch=%s | preliminary=%s",
         window.window_start, window.window_end, window.available_end,
         window.fetch_start, window.fetch_end, window.pending_days,
-        window.is_complete, window.needs_fetch,
+        window.is_complete, window.needs_fetch, window.preliminary,
     )
 
     company_label = request.company_name.strip()
@@ -596,7 +657,30 @@ async def ingest_company_data(
     # Identify the company before searching for it. The registry result decides
     # which regulator the legal queries name; an unidentified company gets
     # generic queries instead of a guessed jurisdiction.
-    identity = await asyncio.to_thread(resolve_identity, company_label)
+    #
+    # A ticker collides with unrelated registered companies, so when the name is
+    # too short for an exact match to mean anything the model is asked which
+    # entity is meant. Until that is settled the jurisdiction is left unused:
+    # aiming legal searches at the wrong country is worse than not aiming them.
+    identity = await asyncio.to_thread(
+        resolve_identity, company_label, preferred_jurisdiction=preferred_jurisdiction
+    )
+    if preferred_jurisdiction is None and identity is not None:
+        candidates = await asyncio.to_thread(rank_candidates, company_label)
+        if needs_caller_choice(company_label, candidates):
+            decided = await disambiguate_with_model(company_label, candidates)
+            if decided and decided != "none":
+                identity = await asyncio.to_thread(
+                    resolve_identity,
+                    company_label,
+                    preferred_jurisdiction=decided,
+                )
+            elif decided == "none":
+                logger.info(
+                    "Identity withheld | company=%r | registry matches are unrelated",
+                    company_label,
+                )
+                identity = None
 
     if window.needs_fetch:
         plan = await plan_searches(company_label, request.meeting_purpose.strip())
@@ -702,6 +786,9 @@ async def ingest_company_data(
         has_hiring=bool(hiring_items),
         has_legal=_mentions_legal(hard_facts),
         has_opinions=bool(analyst_opinions),
+        preliminary=window.preliminary,
+        window_start=window.window_start,
+        window_end=window.available_end,
     )
     logger.info(
         "Coverage | level=%s | facts=%s | sources=%s | missing=%s | checks=%s",

@@ -218,7 +218,8 @@ BriefCortex/
 | `services/sentence_classifier.py` | Fact vs opinion labeling for incidental sentences |
 | `services/incidental*.py` | Facts about us found inside other companies' coverage |
 | `services/corroboration.py` | Targeted follow-up search for an incidental fact |
-| `services/hiring.py` | Careers-page detection and hiring queries |
+| `services/hiring.py` | Line-level hiring detection, careers-URL matching and hiring queries |
+| `services/job_postings.py` | Reads roles from a careers page's schema.org `JobPosting` markup |
 | `services/dedup.py` | Two-stage fact merging that keeps every source |
 | `services/retention.py`, `scheduler.py` | Evidence expiry and URL decay, run on a daily loop |
 | `services/cache.py` | Exact-request cache key and TTL |
@@ -245,7 +246,7 @@ BriefCortex/
 
 1. **Async accept + poll** — generation takes seconds; `202` + polling keeps the UI responsive without websockets. Jobs are held in a task set so the event loop cannot collect them mid-run, and a job stuck in `processing` is failed on next startup.
 2. **Subject routing, not name matching** — an article that merely names the company is not about the company. Each article is routed by its subject before any fact is trusted, which is what stopped a competitor's reporting being filed as ours.
-3. **Hiring is its own lane** — a posting states intent, not outcome, so it informs the model without being asserted as a reported fact.
+3. **Hiring is its own lane** — a posting states intent, not outcome, so it informs the model without being asserted as a reported fact. The decision is made per line and per structured posting, never per page: a markets column mentioning "jobs data" and a careers page's apply buttons are both furniture.
 4. **One fact, every source** — the same fact from five outlets is stored once with all five links. Coverage count is not the claim's value.
 5. **Conflict detection stays off the LLM path** — conflicts are computed independently and served beside the report, never inside the prompt.
 6. **Postgres + repository** — each briefing is a row keyed by UUID; the report lives in one JSONB column.
@@ -305,7 +306,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 174 passed.
+Expected: 202 passed.
 
 > Test count is maintained locally while the frontend suite is still being
 > written; the shared baseline will be the sum of this backend count and whatever

@@ -20,14 +20,29 @@ from app.services.keywords import match_word
 
 # A careers URL is the one reliable page-level signal, so pages on it skip fact
 # mining entirely: a job board has no article to read.
-CAREERS_URL_PATTERNS = (
-    re.compile(r"/careers?(?:/|$)", re.IGNORECASE),
-    re.compile(r"/jobs?(?:/|$|\d)", re.IGNORECASE),
-    re.compile(r"/job-", re.IGNORECASE),
-    re.compile(r"/vacanc", re.IGNORECASE),
-    re.compile(r"/recruit", re.IGNORECASE),
-    re.compile(r"careers\.", re.IGNORECASE),
+#
+# The test is on the host prefix and on whole path *segments*. A loose "contains
+# /jobs" check misfires on article slugs: "week-ahead-apple-amd-jobs-report" and
+# "job-trends/eyepoint-will-halve-workforce" are news stories, not job boards,
+# and treating them as boards wasted nine page fetches per run.
+CAREERS_HOST_PREFIXES = ("careers.", "recruiting.", "jobs.")
+
+# A segment that names a careers area in full.
+CAREERS_SEGMENTS = frozenset(
+    ("career", "careers", "job", "jobs", "vacancy", "vacancies", "recruitment", "recruiting")
 )
+
+# A segment that ends with a careers noun, as in "jobs-career" or
+# "career-vacancies". Publisher slugs compose the words in either order.
+CAREERS_SEGMENT_SUFFIXES = (
+    "-career", "-careers", "-job", "-jobs",
+    "-vacancy", "-vacancies", "-recruitment", "-recruiting",
+)
+
+# Aggregator company pages, which list one employer's openings.
+AGGREGATOR_SEGMENT = "cmp"
+
+_EXTENSION_RE = re.compile(r"\.(html?|php|aspx?|jsp)$", re.IGNORECASE)
 
 # Structured fields of a posting. These are the payload — a role's requirements —
 # and they appear in both proper job boards and social walk-in notices.
@@ -53,7 +68,6 @@ HIRING_STATEMENTS = (
     "inviting eligible candidates",
     "inviting applications",
     "job opportunities",
-    "job openings",
     "walk-in interview",
     "we are hiring",
     "now hiring",
@@ -62,6 +76,26 @@ HIRING_STATEMENTS = (
     "join our team",
     "vacancies available",
     "openings available",
+    "positions available",
+)
+
+# Macro labour-market terms. "Job openings" is the name of a US statistics
+# release (JOLTS), so a markets column reporting it would otherwise read as
+# evidence that a company is hiring.
+LABOUR_STATISTICS = (
+    "jolts",
+    "labor turnover",
+    "labour turnover",
+    "bureau of labor statistics",
+    "bureau of labour statistics",
+    "jobless claims",
+    "nonfarm payroll",
+    "unemployment rate",
+    "payrolls",
+    "labor market",
+    "labour market",
+    "job openings and labor",
+    "measured vacancies",
 )
 
 # Distribution and engagement furniture. A line carrying these is a channel
@@ -117,8 +151,47 @@ def hiring_queries(company: str) -> List[str]:
 
 
 def is_careers_url(url: str) -> bool:
-    """True when the URL is a job board or a company careers section."""
-    return any(pattern.search(url or "") for pattern in CAREERS_URL_PATTERNS)
+    """True when the URL is a job board or a company careers section.
+
+    Judged on whole path segments plus a few host prefixes, so an article slug
+    that merely mentions jobs is not mistaken for one.
+    """
+    if not url:
+        return False
+
+    lowered = url.strip().lower()
+    for separator in ("?", "#"):
+        if separator in lowered:
+            lowered = lowered.split(separator, 1)[0]
+
+    if "//" in lowered:
+        remainder = lowered.split("//", 1)[1]
+    else:
+        remainder = lowered
+
+    host, _, path = remainder.partition("/")
+    host = host.split(":")[0]
+    if host.startswith("www."):
+        host = host[len("www."):]
+
+    if any(
+        host == prefix.rstrip(".") or host.startswith(prefix)
+        for prefix in CAREERS_HOST_PREFIXES
+    ):
+        return True
+
+    for segment in path.split("/"):
+        if not segment:
+            continue
+        segment = _EXTENSION_RE.sub("", segment)
+        if segment in CAREERS_SEGMENTS:
+            return True
+        if segment.endswith(CAREERS_SEGMENT_SUFFIXES):
+            return True
+        if segment == AGGREGATOR_SEGMENT:
+            return True
+
+    return False
 
 
 def is_hiring_line(text: str) -> bool:
@@ -139,6 +212,9 @@ def is_hiring_line(text: str) -> bool:
     if any(marker in lowered for marker in CAREER_ADVICE):
         return False
     if any(marker in lowered for marker in DISCLAIMERS):
+        return False
+    # A macro labour release is not a company's hiring plan.
+    if any(marker in lowered for marker in LABOUR_STATISTICS):
         return False
     # Hashtag spam: mostly '#'-joined tokens.
     if lowered.count("#") >= 2:

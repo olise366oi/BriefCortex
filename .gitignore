@@ -23,3 +23,7 @@ bifrost/logs.db-wal
 bifrost/logs/
 
 *.tsbuildinfo
+
+# Local scratch copies of files under development. They are not part of the
+# source tree; the tracked file is the one under backend/ or frontend/.
+.wh_local/

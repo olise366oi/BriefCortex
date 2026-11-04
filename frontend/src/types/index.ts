@@ -21,7 +21,8 @@ export type {
 export type {
   DebugCoverage,
   DebugFact,
-  DebugIdentity,
+  DebugIdentityCandidate,
   DebugRunRequest,
   DebugRunResponse,
+  DebugWindow,
 } from "./debug";

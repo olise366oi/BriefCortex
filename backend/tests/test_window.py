@@ -78,6 +78,41 @@ def test_a_completed_fetch_never_produces_a_reversed_range():
     assert window.fetch_start <= window.fetch_end
 
 
+def test_a_meeting_beyond_the_window_still_fetches_recent_days():
+    # A meeting 30 days out has a window that starts in the future. Returning
+    # nothing would make a covered company look uncovered, so the latest 30
+    # days are read instead and flagged preliminary.
+    far = datetime(2026, 12, 4, 9, 0, tzinfo=timezone.utc)
+
+    window = compute_evidence_window(far, today=TODAY)
+
+    assert window.needs_fetch is True
+    assert window.preliminary is True
+    assert window.fetch_end == TODAY
+    assert window.fetch_span_days == 30
+
+
+def test_a_meeting_just_inside_the_window_is_not_preliminary():
+    inside = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+
+    window = compute_evidence_window(inside, today=TODAY)
+
+    assert window.needs_fetch is True
+    assert window.preliminary is False
+    assert window.fetch_span_days == 24
+
+
+def test_a_preliminary_window_still_respects_stored_coverage():
+    far = datetime(2026, 12, 4, 9, 0, tzinfo=timezone.utc)
+
+    window = compute_evidence_window(
+        far, today=TODAY, coverage_end=date(2026, 11, 2)
+    )
+
+    assert window.preliminary is True
+    assert window.fetch_start == date(2026, 11, 3)
+
+
 def test_naive_meeting_time_is_accepted():
     window = compute_evidence_window(datetime(2026, 11, 10, 9, 0), today=TODAY)
 

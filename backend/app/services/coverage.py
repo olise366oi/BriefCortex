@@ -18,6 +18,8 @@ from typing import List, Optional
 
 from app.services.company_identity import CompanyIdentity
 
+WINDOW_DAYS = 30
+
 # A lane is "thin" below this. Two articles is not coverage; it is a hint.
 THIN_THRESHOLD = 3
 
@@ -78,12 +80,26 @@ def build_coverage_report(
     has_hiring: bool,
     has_legal: bool,
     has_opinions: bool,
+    preliminary: bool = False,
+    window_start=None,
+    window_end=None,
 ) -> EvidenceCoverageReport:
     """Summarize retrieval coverage and the checks it leaves to the reader."""
     report = EvidenceCoverageReport(
         total_facts=total_facts,
         distinct_sources=distinct_sources,
     )
+
+    if preliminary:
+        # The meeting is far enough out that its own 30-day window has not
+        # started. Saying so keeps the brief from being read as a pre-meeting
+        # picture of the days that will actually lead up to it.
+        report.notes.append(
+            f"The meeting is more than {WINDOW_DAYS} days away, so its own "
+            f"30-day window has not started. This brief covers the latest "
+            f"available evidence ({window_start} to {window_end}) and must be "
+            "refreshed closer to the meeting."
+        )
 
     if total_facts == 0:
         report.notes.append(

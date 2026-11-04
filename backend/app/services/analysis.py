@@ -184,12 +184,12 @@ async def _call_llm_with_retry(
     logger.info("Bifrost headers | %s", bifrost_headers)
 
     @retry(
-        stop=stop_after_attempt(max_retries),
+        stop=stop_after_attempt(2),
         wait=wait_random_exponential(multiplier=1, max=16),
         retry=retry_if_exception(is_retryable_error),
         reraise=True,
     )
-    async def _attempt() -> BriefingReport:
+    async def _transport_call() -> str:
         response = await client.chat.completions.create(
             model=model,
             messages=messages,
@@ -198,55 +198,99 @@ async def _call_llm_with_retry(
             extra_headers=bifrost_headers,
         )
         content = response.choices[0].message.content or ""
-        if not content:
+        if not content.strip():
             raise ValueError("LLM returned empty content")
+        return content
 
-        return BriefingReport.model_validate_json(content)
+    last_error: Exception = RuntimeError("no attempt executed")
 
-    try:
-        report = await _attempt()
-    except ValidationError as exc:
-        # A schema miss is a model mistake, not a transport failure, so it is
-        # handled separately: the error is fed back into the conversation to
-        # give the next attempt a chance to self-correct.
-        logger.warning("LLM schema validation failed | error=%s", exc)
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "Your previous response failed schema validation: "
-                    f"{exc}. Return ONLY a valid JSON object that strictly "
-                    "matches the BriefingReport schema. No markdown fences, "
-                    "no commentary."
-                ),
-            }
-        )
-        raise BriefingGenerationError(
-            f"LLM output did not match the BriefingReport schema: {exc}"
-        ) from exc
-    except Exception as exc:
-        if is_permanent_error(exc):
-            logger.error("LLM call rejected and cannot be retried | error=%s", exc)
+    for attempt in range(1, max_retries + 1):
+        try:
+            content = await _transport_call()
+        except Exception as exc:
+            if is_permanent_error(exc):
+                logger.error("LLM call rejected and cannot be retried | error=%s", exc)
+                raise BriefingGenerationError(
+                    f"LLM request was rejected and cannot be retried: {exc}"
+                ) from exc
+
+            logger.error("LLM call failed after retries | error=%s", exc)
             raise BriefingGenerationError(
-                f"LLM request was rejected and cannot be retried: {exc}"
+                f"LLM failed to produce a valid BriefingReport: {exc}"
             ) from exc
 
-        logger.error("LLM call failed after retries | error=%s", exc)
-        raise BriefingGenerationError(
-            f"LLM failed to produce a valid BriefingReport: {exc}"
-        ) from exc
+        try:
+            report = BriefingReport.model_validate_json(_json_payload(content))
+        except (ValidationError, ValueError) as exc:
+            # A schema miss is a model mistake, not a transport failure, so the
+            # error is fed back into the conversation: a plain retry would send
+            # the identical prompt again and repeat the identical mistake.
+            last_error = exc
+            logger.warning(
+                "LLM output rejected on attempt %s/%s | error=%s",
+                attempt,
+                max_retries,
+                exc,
+            )
+            if attempt == max_retries:
+                break
 
+            messages.append({"role": "assistant", "content": content})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "That response could not be parsed: "
+                        f"{exc}. Reply with ONLY one JSON object matching the "
+                        "schema. No text before or after the object, no markdown "
+                        "fences, no commentary."
+                    ),
+                }
+            )
+            continue
+
+        logger.info(
+            "LLM call succeeded on attempt %s | confidence=%s | "
+            "news=%s hires=%s launches=%s open_questions=%s risks=%s",
+            attempt,
+            report.executive_summary.confidence,
+            len(report.news.items),
+            len(report.hires.items),
+            len(report.launches.items),
+            len(report.open_questions.items),
+            len(report.risks.items),
+        )
+        return report
+
+    raise BriefingGenerationError(
+        f"LLM output did not match the BriefingReport schema after "
+        f"{max_retries} attempts: {last_error}"
+    ) from last_error
+
+
+def _json_payload(content: str) -> str:
+    """Return the JSON object inside a model reply.
+
+    The prompt asks for JSON only, but a reply sometimes carries a sentence
+    after the object (measured: "... include what was not checked are clean.").
+    Trimming to the outermost braces recovers the payload instead of discarding
+    a response that is otherwise complete.
+    """
+    text = content.strip()
+    if text.startswith("{") and text.endswith("}"):
+        return text
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return text
+
+    trimmed = text[start : end + 1]
     logger.info(
-        "LLM call succeeded | confidence=%s | "
-        "news=%s hires=%s launches=%s open_questions=%s risks=%s",
-        report.executive_summary.confidence,
-        len(report.news.items),
-        len(report.hires.items),
-        len(report.launches.items),
-        len(report.open_questions.items),
-        len(report.risks.items),
+        "Trimmed trailing text from model reply | removed=%s chars",
+        len(text) - len(trimmed),
     )
-    return report
+    return trimmed
 
 
 async def generate_briefing_report(
