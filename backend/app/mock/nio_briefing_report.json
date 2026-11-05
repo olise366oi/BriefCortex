@@ -3,11 +3,51 @@
     "items": [
       {
         "claim": "NIO is rumored to be running a vendor cost review across logistics and indirect spend amid the EV price war. [UNVERIFIED]",
-        "source_url": "https://www.reuters.com/business/autos-transportation/nio-vendor-cost-review-2026-05-12/"
+        "source_url": "https://www.reuters.com/business/autos-transportation/nio-vendor-cost-review-2026-05-12/",
+        "date": "",
+        "key_event": true
       },
       {
         "claim": "Unconfirmed supply-chain chatter suggests NIO export growth is raising demand for consolidated freight and spare-parts logistics. [UNVERIFIED]",
-        "source_url": "https://www.reuters.com/business/autos-transportation/nio-export-logistics-2026-05-08/"
+        "source_url": "https://www.reuters.com/business/autos-transportation/nio-export-logistics-2026-05-08/",
+        "date": "",
+        "key_event": true
+      },
+      {
+        "claim": "Unconfirmed reports of NIO expanding consolidated European export logistics lanes. [UNVERIFIED]",
+        "source_url": "https://www.nio.com/news/export-logistics-expansion-unverified",
+        "date": "",
+        "key_event": false
+      },
+      {
+        "claim": "Rumored expansion of battery-swap stations implies higher urgency for spare-parts replenishment logistics. [UNVERIFIED]",
+        "source_url": "https://www.nio.com/news/battery-swap-logistics-unverified",
+        "date": "",
+        "key_event": false
+      },
+      {
+        "claim": "What is NIO's current annual logistics spend by lane, mode, and region? Needed to quantify the 15% rate-reduction ask. [UNVERIFIED]",
+        "source_url": "https://www.nio.com/investor-relations/annual-report-unverified",
+        "date": "",
+        "key_event": false
+      },
+      {
+        "claim": "Are current payment terms actually 180 days, and which vendors are on those terms? Determines whether shortening to 3 months is a credible trade. [UNVERIFIED]",
+        "source_url": "https://www.caixin.com/2026-05-05/nio-supplier-payment-cycle-unverified/",
+        "date": "",
+        "key_event": false
+      },
+      {
+        "claim": "Using the unverified executive-departure rumor may damage trust or create legal exposure. Do not name individuals; use only as timing pressure. [UNVERIFIED]",
+        "source_url": "https://www.linkedin.com/posts/nio-logistics-procurement-rumor-unverified",
+        "date": "",
+        "key_event": false
+      },
+      {
+        "claim": "NIO may push for rate cuts beyond sustainable margin; tie any reduction to a volume floor and 3-month payment terms. [UNVERIFIED]",
+        "source_url": "https://www.reuters.com/business/autos-transportation/nio-vendor-cost-review-2026-05-12/",
+        "date": "",
+        "key_event": false
       }
     ]
   },
@@ -23,40 +63,11 @@
       }
     ]
   },
-  "launches": {
-    "items": [
-      {
-        "claim": "Unconfirmed reports of NIO expanding consolidated European export logistics lanes. [UNVERIFIED]",
-        "source_url": "https://www.nio.com/news/export-logistics-expansion-unverified"
-      },
-      {
-        "claim": "Rumored expansion of battery-swap stations implies higher urgency for spare-parts replenishment logistics. [UNVERIFIED]",
-        "source_url": "https://www.nio.com/news/battery-swap-logistics-unverified"
-      }
-    ]
-  },
-  "open_questions": {
-    "items": [
-      {
-        "claim": "What is NIO's current annual logistics spend by lane, mode, and region? Needed to quantify the 15% rate-reduction ask. [UNVERIFIED]",
-        "source_url": "https://www.nio.com/investor-relations/annual-report-unverified"
-      },
-      {
-        "claim": "Are current payment terms actually 180 days, and which vendors are on those terms? Determines whether shortening to 3 months is a credible trade. [UNVERIFIED]",
-        "source_url": "https://www.caixin.com/2026-05-05/nio-supplier-payment-cycle-unverified/"
-      }
-    ]
-  },
-  "risks": {
-    "items": [
-      {
-        "claim": "Using the unverified executive-departure rumor may damage trust or create legal exposure. Do not name individuals; use only as timing pressure. [UNVERIFIED]",
-        "source_url": "https://www.linkedin.com/posts/nio-logistics-procurement-rumor-unverified"
-      },
-      {
-        "claim": "NIO may push for rate cuts beyond sustainable margin; tie any reduction to a volume floor and 3-month payment terms. [UNVERIFIED]",
-        "source_url": "https://www.reuters.com/business/autos-transportation/nio-vendor-cost-review-2026-05-12/"
-      }
+  "analysis": {
+    "assessment": "Evidence is largely unverified but directionally consistent: NIO appears to be under vendor cost-review pressure while expanding export and battery-swap logistics. Treat all negative signals as leads to confirm in the room, not as public claims.",
+    "risks": [
+      "Using the unverified executive-departure rumor may damage trust or create legal exposure. Do not name individuals; use only as timing pressure. [UNVERIFIED]",
+      "NIO may push for rate cuts beyond sustainable margin; tie any reduction to a volume floor and 3-month payment terms. [UNVERIFIED]"
     ]
   },
   "executive_summary": {

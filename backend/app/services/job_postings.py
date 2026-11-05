@@ -142,15 +142,49 @@ def _location_text(node: dict) -> Optional[str]:
 
 
 # A posting detail URL, which carries a JobPosting block even when the board's
-# index page is a JavaScript shell. Boards address these by numeric id.
+# index page is a JavaScript shell. Most boards publish no JobPosting on the
+# index at all (measured: 0 on Lever, Greenhouse, SmartRecruiters and iCIMS
+# indexes), so detail pages are where the roles actually live.
+#
+# The shapes differ by platform, and the old numeric-id rule matched none of
+# them: Lever uses /{org}/{uuid}, SmartRecruiters /{org}/{digits}-{slug},
+# Greenhouse /{org}/jobs/{digits}, iCIMS /jobs/{digits}/{slug}/job. Index,
+# pagination and login links are excluded explicitly, because they look similar
+# and cost a wasted fetch each.
 POSTING_DETAIL_RE = re.compile(
-    r"""href=["'](?P<href>(?:https?://[^"'/]+)?/?[^"']*?/jobs?/\d[^"']*)["']""",
+    r"""href=["'](?P<href>(?:https?://[^"'/]+)?(?:/[^"'#]*)+)["']""",
+    re.IGNORECASE,
+)
+
+# Path shapes that identify one posting rather than a board or a filter page.
+POSTING_DETAIL_PATTERNS = (
+    # Lever: /{org}/{uuid}. Greenhouse and SmartRecruiters: numeric ids.
+    re.compile(r"/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE),
+    re.compile(r"/[0-9]{6,}(?:-|/|$|\?)", re.IGNORECASE),
+    re.compile(r"/jobs?/\d", re.IGNORECASE),
+    # Slug-based boards, which must also sit under a jobs/careers path:
+    # /join-us/jobs/{dept}/{city}/{role-slug}/, /careers/{role-slug}.
+    # Anchoring on the jobs segment is what stops an unrelated multi-hyphen
+    # path (webinar.amd.com/meet-the-experts-hub/en/home) being fetched as a
+    # posting.
+    re.compile(
+        r"/(?:jobs?|careers?|positions?|openings?)/[^/]+(?:/[^/]+)*[a-z0-9]+(?:-[a-z0-9]+){2,}(?:/|$|\?)",
+        re.IGNORECASE,
+    ),
+)
+
+# Links that are never a single posting.
+NOT_A_POSTING_RE = re.compile(
+    r"(?:page=|start=|search=|categories=|country=|login|signin|sign-in|/jobs?$|/careers?$"
+    r"|/locations?$|/talentcommunity|/candidate-portal|/undefined)",
     re.IGNORECASE,
 )
 
 # How many detail pages to open when the index yields nothing. A handful is
 # enough to prove the company is hiring; the exact list is not the goal.
-MAX_DETAIL_FETCHES = 3
+# How many detail pages to open when the index yields nothing. A handful is
+# enough to prove the company is hiring; the exact list is not the goal.
+MAX_DETAIL_FETCHES = 5
 
 
 def postings_from_html(page_html: str) -> List[JobPosting]:
@@ -210,8 +244,22 @@ def fetch_page(url: str) -> Optional[str]:
         return None
 
 
+def _is_posting_detail(href: str) -> bool:
+    """True when a link points at one posting rather than a board or a filter."""
+    if NOT_A_POSTING_RE.search(href):
+        return False
+    return any(pattern.search(href) for pattern in POSTING_DETAIL_PATTERNS)
+
+
 def _detail_links(page_html: str, base_url: str, limit: int) -> List[str]:
-    """Return posting-detail URLs found on a board's index page."""
+    """Return posting-detail URLs found on a board's index page.
+
+    Absolute links are kept even when they point at another host: a board page
+    hosted on an aggregator (boards.greenhouse.io/optiverus) can list roles that
+    live on the employer's own site, and those are the real postings. Relative
+    links are resolved against the page's own origin, because they belong to it
+    by definition.
+    """
     base = base_url.rstrip("/")
     origin = "/".join(base.split("/")[:3])
 
@@ -219,10 +267,15 @@ def _detail_links(page_html: str, base_url: str, limit: int) -> List[str]:
     seen: set[str] = set()
     for match in POSTING_DETAIL_RE.finditer(page_html):
         href = match.group("href").strip()
-        if href.startswith("/"):
+        if href.startswith("//"):
+            href = "https:" + href
+        elif href.startswith("/"):
             href = origin + href
         elif not href.startswith("http"):
             href = f"{base}/{href.lstrip('./')}"
+
+        if not _is_posting_detail(href):
+            continue
         if href in seen:
             continue
         seen.add(href)

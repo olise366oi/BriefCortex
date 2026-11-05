@@ -9,10 +9,36 @@ from app.models.briefing import (
     BriefingListResponse,
     BriefingRequest,
     BriefingStatusResponse,
+    EntityCandidateList,
+    EntityCandidateRequest,
 )
 from app.services import briefing_service
+from app.services.entity_search import suggest_candidates
 
 router = APIRouter()
+
+
+@router.post(
+    "/candidates",
+    response_model=EntityCandidateList,
+)
+async def list_entity_candidates(
+    payload: EntityCandidateRequest,
+) -> EntityCandidateList:
+    """Return the companies this name might mean, so the caller can confirm one.
+
+    Called after the registry returns several unrelated entities, or none, and
+    the caller described their company in their own words. Each candidate carries
+    the facts that identify it plus a URL, so the caller confirms an entity
+    rather than re-typing a name.
+    """
+    candidates = await suggest_candidates(
+        payload.company_name,
+        payload.description,
+        payload.rejected,
+        payload.round,
+    )
+    return EntityCandidateList(candidates=candidates)
 
 
 @router.post(

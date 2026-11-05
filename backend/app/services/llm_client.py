@@ -7,7 +7,7 @@ the client. Keeping them here means a new caller does not have to copy any of it
 """
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 
 from openai import (
     APIConnectionError,
@@ -45,6 +45,12 @@ class LLMUnavailableError(RuntimeError):
     """Raised when no provider is configured or the request is rejected outright."""
 
 
+# One client per (provider, model, key, base_url). Keyed on the key itself so a
+# test that swaps credentials gets a client built from the new one rather than a
+# stale cached connection.
+_CLIENT_CACHE: Dict[tuple, AsyncOpenAI] = {}
+
+
 def is_permanent_error(exc: Exception) -> bool:
     """True when retrying the same request cannot possibly succeed."""
     return isinstance(exc, PERMANENT_ERRORS)
@@ -79,34 +85,46 @@ def build_client() -> Tuple[AsyncOpenAI, str]:
        holds the provider keys and applies caching and logging.
     2. Fallback to DEEPSEEK_API_KEY (base_url set to DeepSeek).
     3. Fallback to OPENAI_API_KEY (default OpenAI base_url, model gpt-4o-mini).
+
+    The client is cached per (provider, model) because callers build it once per
+    article: the same key was being turned into a new connection pool for every
+    page and every sentence batch (measured: 100+ selections on one briefing).
+    A client is immutable once created, so reuse is safe.
     """
+    route, model, api_key, base_url = _resolve_route()
+    cache_key = (route, model, api_key, base_url)
+
+    client = _CLIENT_CACHE.get(cache_key)
+    if client is not None:
+        return client, model
+
+    logger.info("LLM client selected | provider=%s | model=%s", route, model)
+    if base_url:
+        client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    else:
+        client = AsyncOpenAI(api_key=api_key)
+
+    _CLIENT_CACHE[cache_key] = client
+    return client, model
+
+
+def _resolve_route() -> Tuple[str, str, str, Optional[str]]:
+    """Return (provider, model, api_key, base_url) for the configured provider."""
     settings = get_settings()
 
     if settings.GATEWAY_BASE_URL:
         # The gateway authorises on its own keys, so a placeholder is enough;
         # the real upstream credential never leaves the gateway container.
         model = settings.GATEWAY_MODEL or f"deepseek/{DEFAULT_MODEL}"
-        logger.info("LLM client selected | provider=gateway | model=%s", model)
-        client = AsyncOpenAI(
-            api_key="gateway-managed",
-            base_url=settings.GATEWAY_BASE_URL,
-        )
-        return client, model
+        return "gateway", model, "gateway-managed", settings.GATEWAY_BASE_URL
 
     if settings.DEEPSEEK_API_KEY:
         model = settings.DEEPSEEK_MODEL or DEFAULT_MODEL
-        logger.info("LLM client selected | provider=deepseek | model=%s", model)
-        client = AsyncOpenAI(
-            api_key=settings.DEEPSEEK_API_KEY,
-            base_url="https://api.deepseek.com",
-        )
-        return client, model
+        return "deepseek", model, settings.DEEPSEEK_API_KEY, "https://api.deepseek.com"
 
     if settings.OPENAI_API_KEY:
         model = settings.OPENAI_MODEL or "gpt-4o-mini"
-        logger.info("LLM client selected | provider=openai | model=%s", model)
-        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-        return client, model
+        return "openai", model, settings.OPENAI_API_KEY, None
 
     raise LLMUnavailableError(
         "No LLM API key found. Set DEEPSEEK_API_KEY or OPENAI_API_KEY, "

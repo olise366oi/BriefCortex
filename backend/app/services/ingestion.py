@@ -29,6 +29,7 @@ from app.services.freshness import (
 from app.services.article_subject import classify_article_subjects
 from app.services.company_identity import (
     disambiguate_with_model,
+    jurisdiction_from_description,
     needs_caller_choice,
     rank_candidates,
     resolve_identity,
@@ -36,7 +37,14 @@ from app.services.company_identity import (
 from app.services.coverage import build_coverage_report
 from app.services.corroboration import corroborate_incidental_facts
 from app.services.dedup import drop_duplicate_facts, merge_duplicate_facts
-from app.services.hiring import hiring_queries, is_careers_url, is_hiring_line
+from app.services.entity_disambiguation import filter_by_entity
+from app.services.hiring import (
+    LINKEDIN_JOB_DOMAINS,
+    hiring_queries,
+    is_careers_url,
+    is_hiring_line,
+    linkedin_hiring_queries,
+)
 from app.services.incidental import opening_sentence
 from app.services.job_postings import JobPosting, postings_from_url
 from app.services.keywords import match_word
@@ -46,7 +54,7 @@ from app.services.legal_signals import legal_queries
 from app.services.logger_service import get_logger
 from app.services.publisher_filter import extract_clean_text, host_of
 from app.services.search_planner import SearchPlan, plan_searches
-from app.services.tavily_search import tavily_search
+from app.services.tavily_search import extract_bodies, tavily_search
 from app.services.window import compute_evidence_window
 
 logger = get_logger("ingestion")
@@ -89,9 +97,11 @@ async def _search_query(
     start_date: str,
     end_date: str,
     company_name: str,
+    aliases: Optional[List[str]] = None,
+    dated: bool = True,
 ) -> List[dict]:
     return await asyncio.to_thread(
-        tavily_search, query, start_date, end_date, company_name, domains
+        tavily_search, query, start_date, end_date, company_name, domains, aliases, dated
     )
 
 
@@ -121,27 +131,33 @@ async def _run_round(
     company_name: str,
     merged: List[dict],
     seen_urls: set,
-) -> Tuple[int, int]:
+    aliases: Optional[List[str]] = None,
+    dated: bool = True,
+) -> Tuple[List[dict], int, int]:
     """Run a round of queries concurrently and fold the results in.
 
     ``seen_urls`` already contains every URL stored from earlier runs, so a
     result the company has already been briefed on is not counted as new.
-    Returns (usable_with_body, newly_added).
+    Returns (results_kept, usable_with_body, newly_added). The kept results are
+    returned as well so independent lanes can be merged by the caller after they
+    finish, instead of racing over one shared list.
     """
     batches = await asyncio.gather(
         *[
-            _search_query(query, domains, start_date, end_date, company_name)
+            _search_query(query, domains, start_date, end_date, company_name, aliases, dated)
             for query in queries
         ]
     )
 
+    kept: List[dict] = []
     usable = 0
     added = 0
     for batch in batches:
         usable += _usable_count(batch)
         added += _merge_batch(merged, seen_urls, batch)
+        kept.extend(batch)
 
-    return usable, added
+    return kept, usable, added
 
 
 async def _refill_missing_bodies(
@@ -150,16 +166,47 @@ async def _refill_missing_bodies(
     start_date: str,
     end_date: str,
     company_name: str,
+    aliases: Optional[List[str]] = None,
 ) -> List[dict]:
-    """Re-run the queries without the publishers that returned no body.
+    """Recover the results that arrived without a body.
 
-    Some publishers answer with a page shell, so their stories would otherwise
-    be lost. The empty-body hosts are dropped and the same queries re-run, letting
-    a syndicated telling take the slot. This is a one-shot repair: it runs only
-    once per request and only when bodies are genuinely missing, because every
-    run costs a full round of Tavily calls and the refill mostly returns the
-    same shells again.
+    Some publishers answer a search with a page shell, so their stories would
+    otherwise be lost. Two repairs run in order: the empty-body URLs are
+    fetched directly first, because a targeted extract recovers the page that
+    the search result already points at (measured: 1 of 1 shell recovered,
+    24892 chars). Only if that leaves coverage short are the empty-body hosts
+    dropped and the queries re-run, letting a syndicated telling take the slot.
+
+    This is a one-shot repair: it runs only once per request and only when
+    bodies are genuinely missing, because every run costs Tavily calls.
     """
+    empty = [
+        str(result.get("url") or "")
+        for result in merged
+        if not (result.get("raw_content") or "").strip()
+    ]
+    empty_urls = [url for url in empty if url]
+    if not empty_urls:
+        return merged
+
+    recovered = await asyncio.to_thread(extract_bodies, empty_urls)
+    if recovered:
+        filled = 0
+        for result in merged:
+            url = str(result.get("url") or "")
+            if (result.get("raw_content") or "").strip():
+                continue
+            body = recovered.get(url)
+            if body:
+                result["raw_content"] = body
+                filled += 1
+        logger.info(
+            "Body recovery | requested=%s | recovered=%s | filled=%s",
+            len(empty_urls),
+            len(recovered),
+            filled,
+        )
+
     empty_hosts = {
         host_of(str(result.get("url") or ""))
         for result in merged
@@ -191,7 +238,7 @@ async def _refill_missing_bodies(
     )
 
     seen_urls = {str(r.get("url") or "").strip().rstrip("/") for r in merged}
-    _, added = await _run_round(
+    _kept, _usable, added = await _run_round(
         plan.queries,
         retry_domains,
         start_date,
@@ -199,6 +246,7 @@ async def _refill_missing_bodies(
         company_name,
         merged,
         seen_urls,
+        aliases,
     )
     logger.info("Body refill | new_results=%s | total=%s", added, len(merged))
     return merged
@@ -211,6 +259,8 @@ async def _search_plan(
     company_name: str,
     known_urls: Optional[set] = None,
     open_queries: Optional[List[str]] = None,
+    aliases: Optional[List[str]] = None,
+    linkedin_queries: Optional[List[str]] = None,
 ) -> List[dict]:
     """Run the planned queries until two consecutive rounds bring nothing new.
 
@@ -232,29 +282,64 @@ async def _search_plan(
     known_before = set(seen_urls)
     started_at = time.monotonic()
 
-    usable, added = await _run_round(
-        plan.queries, plan.domains, start_date, end_date, company_name,
-        merged, seen_urls,
-    )
+    # Each lane folds into its own list; the lists are merged once afterwards.
+    lanes = [
+        _run_round(
+            plan.queries, plan.domains, start_date, end_date, company_name,
+            [], set(seen_urls), aliases,
+        )
+    ]
+    lane_labels = ["news"]
+
+    if open_queries:
+        # Open-domain answers are structural, not news: a regulator's case page
+        # and a careers listing carry no publish date, so a dated search drops
+        # all of them. Both lanes therefore run undated.
+        lanes.append(
+            _run_round(
+                open_queries, [], start_date, end_date, company_name,
+                [], set(seen_urls), aliases, dated=False,
+            )
+        )
+        lane_labels.append("open")
+
+    if linkedin_queries:
+        # A job board lists roles that no press release covers, so the hiring
+        # lane reads LinkedIn directly as well. It runs against a fixed domain
+        # list and undated, because a posting has no publish date.
+        lanes.append(
+            _run_round(
+                linkedin_queries, list(LINKEDIN_JOB_DOMAINS), start_date, end_date,
+                company_name, [], set(seen_urls), aliases, dated=False,
+            )
+        )
+        lane_labels.append("linkedin")
+
+    lane_results = await asyncio.gather(*lanes)
+
+    usable = 0
+    added = 0
+    for label, (lane_kept, lane_usable, _lane_added) in zip(lane_labels, lane_results):
+        usable += lane_usable
+        merged_added = _merge_batch(merged, seen_urls, lane_kept)
+        added += merged_added
+        logger.info(
+            "Lane complete | lane=%s | usable=%s | unique_added=%s | total=%s",
+            label,
+            lane_usable,
+            merged_added,
+            len(merged),
+        )
+
     logger.info(
-        "Search round 1 | queries=%s | usable=%s | new_urls=%s | known_before=%s "
-        "| total=%s | elapsed=%.1fs",
-        len(plan.queries), usable, added, len(known_before), len(merged),
+        "Opening lanes ran in parallel | lanes=%s | usable=%s | new_urls=%s "
+        "| known_before=%s | total=%s | elapsed=%.1fs",
+        lane_labels, usable, added, len(known_before), len(merged),
         time.monotonic() - started_at,
     )
 
-    if open_queries:
-        open_usable, open_added = await _run_round(
-            open_queries, [], start_date, end_date, company_name,
-            merged, seen_urls,
-        )
-        logger.info(
-            "Open-domain round | queries=%s | usable=%s | new_urls=%s | total=%s",
-            len(open_queries), open_usable, open_added, len(merged),
-        )
-
     merged = await _refill_missing_bodies(
-        merged, plan, start_date, end_date, company_name
+        merged, plan, start_date, end_date, company_name, aliases
     )
 
     round_index = 1
@@ -272,9 +357,9 @@ async def _search_plan(
         take = pending[:MAX_EXTRA_QUERIES]
         pending = pending[MAX_EXTRA_QUERIES:]
 
-        usable, added = await _run_round(
+        _kept, usable, added = await _run_round(
             take, plan.domains, start_date, end_date, company_name,
-            merged, seen_urls,
+            merged, seen_urls, aliases,
         )
         stale_rounds = 0 if added else stale_rounds + 1
 
@@ -323,10 +408,44 @@ def _build_company_id(company_name: str) -> str:
     return f"company-{digest}"
 
 
+def title_names_company(result: dict, company: str, aliases: Optional[List[str]] = None) -> bool:
+    """True when the publisher's own headline names the company being briefed.
+
+    The headline is the publisher's statement of what the article is about, so it
+    settles the subject when the body is ambiguous. Word boundaries are used so
+    "NVIDIA" does not match inside a longer token, and the registry legal name is
+    accepted as well, because a headline often uses the formal name.
+    """
+    title = " ".join(str(result.get("title") or "").split())
+    if not title:
+        return False
+
+    names = [company.strip()]
+    for alias in aliases or []:
+        alias_text = (alias or "").strip()
+        if alias_text and alias_text.lower() != company.strip().lower():
+            names.append(alias_text)
+
+    lowered = title.lower()
+    for name in names:
+        clean = name.lower()
+        if not clean:
+            continue
+        if clean.isascii():
+            pattern = rf"(?<![a-z0-9]){re.escape(clean)}(?![a-z0-9])"
+            if re.search(pattern, lowered):
+                return True
+        elif clean in lowered:
+            return True
+    return False
+
+
 async def _route_and_collect(
     results: List[dict],
     window_start: str,
     company: str,
+    company_description: str = "",
+    aliases: Optional[List[str]] = None,
 ) -> Tuple[List[FactItem], List[FactItem], List[FactItem], List[dict], dict]:
     """Route each article by its subject, then read it accordingly.
 
@@ -338,6 +457,10 @@ async def _route_and_collect(
     Careers pages skip routing entirely: a posting has no article subject, so
     asking the subject classifier about it wastes a call and always answers
     wrong.
+
+    ``company_description`` is passed to the classifier so a shared name can be
+    split: two businesses both called Instinct publish their own numbers, and only
+    the caller's description says which one the brief is about.
     """
     prepared: List[dict] = []
     postings_entries: List[dict] = []
@@ -387,11 +510,13 @@ async def _route_and_collect(
     routes = await classify_article_subjects(
         [opening_sentence(item["clean_text"]) for item in prepared],
         company,
+        company_description,
     )
     by_index = {route.index: route for route in routes}
 
     own_articles: List[dict] = []
     other_articles: List[dict] = []
+    promoted = 0
     for index, item in enumerate(prepared):
         route = by_index.get(index)
         entry = {
@@ -399,6 +524,20 @@ async def _route_and_collect(
             "url": item["url"],
             "clean_text": item["clean_text"],
         }
+        title_hit = title_names_company(item["result"], company, aliases=aliases)
+        if title_hit:
+            # A headline that names the company is about the company. The opening
+            # sentence decides routing everywhere else, but on a large company the
+            # classifier errs the other way: an article whose headline says
+            # "NVIDIA reports record revenue" and whose body also discusses peers
+            # came back as "comparison", and its facts were then offered as
+            # unconfirmed leads instead of as news. The headline is the publisher's
+            # own statement of the subject, so it outranks a body reading.
+            if route is not None and route.subject != "primary":
+                promoted += 1
+            own_articles.append(entry)
+            continue
+
         if route is not None and route.subject == "primary":
             own_articles.append(entry)
         else:
@@ -407,8 +546,15 @@ async def _route_and_collect(
             # stage so the mention is kept instead of discarded with the article.
             other_articles.append(entry)
 
+    if promoted:
+        logger.info(
+            "Headline named the company | promoted_to_news=%s | company=%r",
+            promoted,
+            company,
+        )
+
     hard_facts, analyst_opinions, hiring_items, stats = _collect_hard_facts(
-        own_articles + postings_entries, window_start
+        own_articles + postings_entries, window_start, company
     )
     return hard_facts, analyst_opinions, hiring_items, other_articles, prepared, stats
 
@@ -416,6 +562,7 @@ async def _route_and_collect(
 def _collect_hard_facts(
     articles: List[dict],
     window_start: str,
+    company: str = "",
 ) -> Tuple[List[FactItem], List[FactItem], List[FactItem], dict]:
     """Read articles about our company and return (facts, opinions, hiring, stats).
 
@@ -459,7 +606,7 @@ def _collect_hard_facts(
                 stats["hiring_sources"] += 1
             else:
                 posting_facts, posting_stats = _collect_posting(
-                    clean_text, source_url, publish_date, window_start
+                    clean_text, source_url, publish_date, window_start, company
                 )
                 stats["hiring_sources"] += posting_stats["hiring_sources"]
                 stats["stale_fact"] += posting_stats["stale_fact"]
@@ -570,11 +717,66 @@ def _posting_items(
     return items
 
 
+def _drop_out_of_window(
+    results: List[dict],
+    window_start: date,
+    window_end: date,
+) -> List[dict]:
+    """Remove articles published outside the evidence window.
+
+    Two rounds deliberately search without date bounds, because the pages they
+    need carry no publish date at all: a regulator's case page and a job posting.
+    That also lets those rounds return genuine news articles from months earlier
+    (measured: a TechCrunch piece from 2026-08-24 inside a 30-day window), and
+    nothing downstream caught it — the staleness check reads dates named in the
+    sentence, not the article's own publication date.
+
+    An article with no resolvable date is kept: dropping it would discard the
+    structural pages this exists for. Its content is still checked against the
+    window sentence by sentence.
+    """
+    kept: List[dict] = []
+    dropped: List[str] = []
+
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        published = parse_publish_date(result.get("published_date"))
+        if published is None:
+            kept.append(result)
+            continue
+
+        published_date = published.date()
+        if window_start <= published_date <= window_end:
+            kept.append(result)
+        else:
+            dropped.append(f"{published_date} {str(result.get('url') or '')[:70]}")
+
+    if dropped:
+        logger.info(
+            "Dropped %s article(s) published outside %s..%s | %s",
+            len(dropped),
+            window_start,
+            window_end,
+            dropped[:5],
+        )
+    return kept
+
+
+def _company_tokens(company: str) -> List[str]:
+    """Return the searchable name tokens of a company, used to attribute a page."""
+    import re as _re
+
+    parts = [part for part in _re.split(r"[^a-z0-9]+", company.lower()) if len(part) > 2]
+    return parts
+
+
 def _collect_posting(
     clean_text: str,
     source_url: str,
     publish_date: Optional[datetime],
     window_start: str,
+    company: str = "",
 ) -> Tuple[List[FactItem], dict]:
     """Read a careers page and keep only the lines that describe a role.
 
@@ -582,10 +784,24 @@ def _collect_posting(
     a walk-in notice posted as an ordinary social update, and a markets column
     that says "jobs data" holds nothing. ``is_hiring_line`` makes that call, so
     this function only reads and deduplicates.
+
+    ``company`` guards against a job board's generic pages. LinkedIn returns an
+    index for "jobs hiring jobs" alongside the company's own, and those pages list
+    other employers' roles; a line is kept only when the page itself names the
+    company being briefed.
     """
     stats = {"hiring_sources": 0, "stale_fact": 0}
     items: List[FactItem] = []
     seen: set[str] = set()
+
+    tokens = _company_tokens(company)
+    page_is_ours = tokens and any(token in clean_text.lower() for token in tokens)
+
+    if tokens and not page_is_ours:
+        logger.info(
+            "Posting page skipped | does not name the company | url=%s", source_url
+        )
+        return items, stats
 
     for line in clean_text.splitlines():
         text = " ".join(line.split())
@@ -662,10 +878,23 @@ async def ingest_company_data(
     # too short for an exact match to mean anything the model is asked which
     # entity is meant. Until that is settled the jurisdiction is left unused:
     # aiming legal searches at the wrong country is worse than not aiming them.
-    identity = await asyncio.to_thread(
-        resolve_identity, company_label, preferred_jurisdiction=preferred_jurisdiction
+    #
+    # A caller who rejected every registry candidate ("other") supplies a
+    # description instead, and that description becomes the only source of
+    # jurisdiction. The registry is then never used as a fallback, because its
+    # closest match is an unrelated business that shares the name.
+    description_hint = jurisdiction_from_description(request.company_description)
+    confirmed_other = bool(request.company_description.strip()) and (
+        preferred_jurisdiction is None
     )
-    if preferred_jurisdiction is None and identity is not None:
+
+    identity = await asyncio.to_thread(
+        resolve_identity,
+        company_label,
+        preferred_jurisdiction=preferred_jurisdiction or description_hint,
+        allow_fallback=not confirmed_other,
+    )
+    if not confirmed_other and preferred_jurisdiction is None and identity is not None:
         candidates = await asyncio.to_thread(rank_candidates, company_label)
         if needs_caller_choice(company_label, candidates):
             decided = await disambiguate_with_model(company_label, candidates)
@@ -682,6 +911,25 @@ async def ingest_company_data(
                 )
                 identity = None
 
+    if confirmed_other:
+        logger.info(
+            "Caller described the company | company=%r | description=%r | "
+            "jurisdiction=%s | registry_identity=%s",
+            company_label,
+            request.company_description.strip()[:120],
+            description_hint,
+            identity.name if identity is not None else None,
+        )
+
+    if request.company_description.strip():
+        logger.info(
+            "Description available for entity separation | company=%r", company_label
+        )
+
+    # Kept in scope outside the fetch branch: the routing stage uses the registry
+    # name to read headlines, whether or not retrieval ran this time.
+    aliases = [identity.name] if identity is not None else None
+
     if window.needs_fetch:
         plan = await plan_searches(company_label, request.meeting_purpose.strip())
         logger.info(
@@ -693,6 +941,9 @@ async def ingest_company_data(
         # Hiring runs here too: a careers page is usually on the company's own
         # site, which the publisher registry does not contain by design.
         open_queries = legal_queries(company_label, identity) + hiring_queries(company_label)
+        linkedin_queries = linkedin_hiring_queries(company_label)
+        # The registry name is the company's other name, and headlines use it:
+        # a search for "IBM" otherwise discards "International Business Machines".
         fetched = await _search_plan(
             plan,
             window.fetch_start.isoformat(),
@@ -700,6 +951,8 @@ async def ingest_company_data(
             company_label,
             known_urls=known_urls,
             open_queries=open_queries,
+            aliases=aliases,
+            linkedin_queries=linkedin_queries,
         )
     else:
         # Everything up to today is already covered, so reuse what is stored
@@ -708,11 +961,13 @@ async def ingest_company_data(
         fetched = []
 
     fetched = await resolve_publish_dates(fetched)
+    fetched = _drop_out_of_window(fetched, window.window_start, window.available_end)
     fetched = order_by_publisher(fetched)
 
     hard_facts, analyst_opinions, hiring_items, other_articles, prepared, stats = (
         await _route_and_collect(
-            fetched, window.window_start.isoformat(), company_label
+            fetched, window.window_start.isoformat(), company_label,
+            request.company_description, aliases,
         )
     )
 
@@ -742,6 +997,15 @@ async def ingest_company_data(
             window.fetch_end.isoformat(),
             company_label,
             known_urls=known_urls,
+        )
+
+    # Same-name businesses share these words, so a sentence that names our
+    # company may be about another one entirely. The caller's description is the
+    # only thing that distinguishes them, so it filters the trailing reference
+    # block. Nothing here can reach the brief itself: these are leads beside it.
+    if incidental and request.company_description.strip():
+        incidental = filter_by_entity(
+            incidental, request.company_description, company_label
         )
 
     # Two stages, in the order the reader benefits from them.

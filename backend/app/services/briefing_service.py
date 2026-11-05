@@ -5,7 +5,7 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Set
+from typing import Optional, Set
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
@@ -30,6 +30,8 @@ from app.models.fact_base import FactBase, FactItem
 from app.repositories.briefing_repository import BriefingRepository, EvidenceRepository
 from app.services.analysis import generate_briefing_report
 from app.services.cache import DEFAULT_TTL_HOURS as CACHE_TTL_HOURS
+from app.services.cache_invalidation import InvalidationVerdict, check_reuse
+from app.services.evidence_fingerprint import evidence_fingerprint
 from app.services.ingestion import _build_company_id, ingest_company_data
 from app.services.logger_service import get_logger
 from app.services.window import compute_evidence_window
@@ -52,6 +54,38 @@ USER_FACING_ERROR = "Brief generation failed. Please try again."
 def _load_mock_report() -> BriefingReport:
     payload = json.loads(MOCK_REPORT_PATH.read_text(encoding="utf-8"))
     return BriefingReport.model_validate(payload)
+
+
+def _previous_report_for(
+    repo: "BriefingRepository",
+    company_name: str,
+    exclude_id,
+) -> Optional[BriefingReport]:
+    """Return the most recent completed brief for this company, if any.
+
+    A later run is a revision of an earlier one, so the earlier brief's
+    conclusions must be available to compare against — and available nowhere
+    else. Without this the second brief was generated as if it were the first:
+    the reader got a fresh reading with no statement of what had changed, and the
+    revision prompt that exists was never reached in production.
+    """
+    for candidate in repo.list_all():
+        if candidate.id == exclude_id:
+            continue
+        if candidate.company_name.strip().lower() != company_name.strip().lower():
+            continue
+        if candidate.status != BriefingJobStatus.COMPLETED.value:
+            continue
+        if not candidate.report:
+            continue
+        try:
+            return BriefingReport.model_validate(candidate.report)
+        except Exception as exc:
+            logger.warning(
+                "Previous report unreadable | id=%s | %s", candidate.id, exc
+            )
+            return None
+    return None
 
 
 async def _generate_live_report(
@@ -152,10 +186,49 @@ async def _generate_live_report(
         window.fetch_end,
     )
 
+    # Keyed on the evidence rather than the calendar. Two runs whose facts match
+    # are the same brief, so the second one skips inference entirely — the
+    # calendar-keyed cache missed whenever a meeting moved by a day even though
+    # nothing about the company had changed.
+    description = getattr(record, "company_description", "") or ""
+    fingerprint = evidence_fingerprint(fact_base, record.meeting_purpose, description)
+    briefing_repo = BriefingRepository(db)
+    reused = briefing_repo.find_by_fingerprint(record.company_name, fingerprint)
+    if reused is not None:
+        # Same facts, but they may contradict what the stored brief assumed. A
+        # brief written while the company was hiring is wrong the moment a
+        # layoff is reported, and the fingerprint cannot see that on its own.
+        verdict = check_reuse(reused.evidence, fact_base)
+        if verdict.reusable:
+            logger.info(
+                "Evidence-set cache hit | id=%s | fingerprint=%s | company=%r | "
+                "skipped_inference=True",
+                reused.id,
+                fingerprint,
+                record.company_name,
+            )
+            return (
+                BriefingReport.model_validate(reused.report),
+                _build_evidence_summary(fact_base),
+            )
+
+        logger.info(
+            "Evidence-set cache invalidated | id=%s | company=%r | reason=%s",
+            reused.id,
+            record.company_name,
+            verdict.reason,
+        )
+
     report = await generate_briefing_report(
         fact_base=fact_base,
         meeting_purpose=record.meeting_purpose,
+        previous=_previous_report_for(
+            briefing_repo, record.company_name, record.id
+        ),
+        company=record.company_name,
+        description=description,
     )
+    briefing_repo.update(record.id, evidence_fingerprint=fingerprint)
     return report, _build_evidence_summary(fact_base)
 
 
@@ -338,15 +411,27 @@ async def create_briefing(db: Session, request: BriefingRequest) -> uuid.UUID:
     # An identical request inside the TTL is already answered. Reuse that
     # record instead of paying for retrieval and inference again; the poll
     # endpoint serves it directly because its status is already completed.
+    #
+    # The stored brief is cross-checked against the facts on file before it is
+    # served: an exact request is not the same as the same evidence.
     cached = repo.find_cached(company, purpose, request.meeting_time)
     if cached is not None and _is_fresh(cached):
+        verdict = _stored_brief_still_holds(db, cached)
+        if verdict.reusable:
+            logger.info(
+                "Request served from cache | id=%s | company=%r | purpose=%r",
+                cached.id,
+                company,
+                purpose,
+            )
+            return cached.id
+
         logger.info(
-            "Request served from cache | id=%s | company=%r | purpose=%r",
+            "Cache entry invalidated | id=%s | company=%r | reason=%s",
             cached.id,
             company,
-            purpose,
+            verdict.reason,
         )
-        return cached.id
 
     record = repo.create(
         company_name=company,
@@ -357,6 +442,31 @@ async def create_briefing(db: Session, request: BriefingRequest) -> uuid.UUID:
 
     _spawn_job(record.id, settings)
     return record.id
+
+
+def _stored_brief_still_holds(db: Session, record: BriefingRecord) -> InvalidationVerdict:
+    """Cross-check a stored brief against the facts currently on file.
+
+    Called before a cached brief is served. The stored evidence beside the report
+    is compared with what `EvidenceRepository` holds now, so a contradiction that
+    arrived after the brief was written invalidates it instead of being served.
+    """
+    company_id = _build_company_id(record.company_name)
+    current = EvidenceRepository(db).list_by_kind(company_id, "hard")
+
+    current_items = [
+        FactItem(content=row.content, source_url=row.source_url)
+        for row in current
+        if row.content and row.source_url
+    ]
+
+    fact_base = FactBase(
+        company_id=company_id,
+        last_refresh_date=datetime.now(timezone.utc),
+        hard_facts=current_items,
+        analyst_opinions=[],
+    )
+    return check_reuse(record.evidence, fact_base)
 
 
 def _is_fresh(record: BriefingRecord) -> bool:

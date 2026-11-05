@@ -14,6 +14,7 @@ name closeness, and a miss is reported honestly rather than guessed.
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -96,6 +97,37 @@ SHORT_NAME_CHARS = 6
 # Any candidate at least this strong, when the wanted name is short, means the
 # choice has to come from the caller.
 STRONG_MATCH = 0.95
+
+# Place names a caller may use to say where a company operates, mapped to ISO
+# codes. Only used when the registry has no entry, and only for explicit names:
+# a city or country the caller wrote, never an inference from the industry.
+COUNTRY_HINTS = (
+    ("san francisco", "US"),
+    ("silicon valley", "US"),
+    ("california", "US"),
+    ("new york", "US"),
+    ("united states", "US"),
+    ("usa", "US"),
+    ("london", "GB"),
+    ("united kingdom", "GB"),
+    ("berlin", "DE"),
+    ("germany", "DE"),
+    ("paris", "FR"),
+    ("france", "FR"),
+    ("amsterdam", "NL"),
+    ("netherlands", "NL"),
+    ("bangalore", "IN"),
+    ("bengaluru", "IN"),
+    ("mumbai", "IN"),
+    ("india", "IN"),
+    ("singapore", "SG"),
+    ("tokyo", "JP"),
+    ("japan", "JP"),
+    ("shenzhen", "CN"),
+    ("shanghai", "CN"),
+    ("beijing", "CN"),
+    ("china", "CN"),
+)
 
 DISAMBIGUATION_PROMPT = """You decide which registered entity a business user means.
 
@@ -290,10 +322,36 @@ def is_ambiguous(candidates: List[IdentityCandidate]) -> bool:
     return (candidates[0].confidence - candidates[1].confidence) < AMBIGUITY_MARGIN
 
 
+def jurisdiction_from_description(description: str) -> Optional[str]:
+    """Return a country code named in the caller's description, if any.
+
+    A private startup has no registry entry, so the caller's own words are the
+    only source for where it operates: "San Francisco AI assistant startup"
+    means US. Only explicit place names are read; nothing is inferred from the
+    industry, because aiming legal searches at a guessed country returns another
+    country's news.
+
+    Matching is on whole words, longest first. A plain substring test reads
+    "Chinatown" as China and would aim the legal search at the wrong regulator.
+    """
+    text = (description or "").lower()
+    if not text:
+        return None
+
+    # Longest phrase first, so "united states" wins over a shorter contained
+    # hint and a multi-word place name is never split.
+    for name, code in sorted(COUNTRY_HINTS, key=lambda pair: -len(pair[0])):
+        pattern = rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])"
+        if re.search(pattern, text):
+            return code
+    return None
+
+
 def resolve_identity(
     company_name: str,
     *,
     preferred_jurisdiction: Optional[str] = None,
+    allow_fallback: bool = True,
 ) -> Optional[CompanyIdentity]:
     """Look the company up and return the best-matching registered entity.
 
@@ -303,6 +361,13 @@ def resolve_identity(
 
     ``preferred_jurisdiction`` pins the answer to a country the caller chose, so
     a name shared by several entities resolves to the intended one.
+
+    ``allow_fallback=False`` is what the caller's "none of these" answer means:
+    a name is registered somewhere, but not for the company being briefed. The
+    registry match is then withheld entirely rather than falling back to an
+    unrelated entity that happens to share the name. That fallback was a live
+    defect: a model verdict of "none" for a San Francisco startup still produced
+    an Indian entity and aimed the legal searches at Indian regulators.
     """
     name = company_name.strip()
     if not name:
@@ -323,6 +388,33 @@ def resolve_identity(
         ]
         if matching:
             chosen = matching[0]
+        else:
+            # The caller named a country and no candidate is registered there.
+            # Falling through to candidates[0] would answer with a different
+            # country while looking like a confirmation, which is how a caller's
+            # "US" still produced an Indian entity and Indian regulators.
+            logger.info(
+                "Identity withheld | company=%r | no candidate in %s (have %s)",
+                name,
+                wanted,
+                sorted({(c.jurisdiction or "?") for c in candidates}),
+            )
+            return None
+
+    if not allow_fallback:
+        # The caller rejected this registry entity. A perfect name match is not
+        # a counter-argument: the whole reason they were asked is that several
+        # unrelated businesses share the name, so identity is withheld outright
+        # and the description becomes the only source of jurisdiction.
+        logger.info(
+            "Identity withheld | company=%r | caller rejected all %s candidates "
+            "(top match was %r in %s)",
+            name,
+            len(candidates),
+            chosen.name,
+            chosen.jurisdiction or "?",
+        )
+        return None
 
     identity = CompanyIdentity(
         name=chosen.name,

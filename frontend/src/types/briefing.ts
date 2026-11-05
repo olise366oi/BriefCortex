@@ -1,7 +1,14 @@
 export interface BriefingRequest {
   company_name: string;
   meeting_time: string;
+  /** The order the pipeline must read the brief in. */
   meeting_purpose: string;
+  /**
+   * The caller's own wording for the company. Needed when a name alone cannot
+   * identify it: the registry may return several unrelated entities, or two
+   * businesses may trade under the same name.
+   */
+  company_description?: string;
 }
 
 export interface BriefingAcceptedResponse {
@@ -18,6 +25,10 @@ export type BriefingJobStatus =
 export interface Claim {
   claim: string;
   source_url: string;
+  /** ISO date of the report, or empty when the source carries none. */
+  date?: string;
+  /** True for developments a reader preparing for this meeting needs. */
+  key_event?: boolean;
 }
 
 export interface ClaimModule {
@@ -30,13 +41,49 @@ export interface ExecutiveSummary {
   confidence: string;
 }
 
+/** The assessment between the facts and the advice. */
+export interface Analysis {
+  assessment: string;
+  risks: string[];
+}
+
+export interface RevisionNote {
+  change: string;
+  why: string;
+}
+
+/** A claim the audit removed. Shown as an explanation, never as a finding. */
+export interface AuditRemoval {
+  section: string;
+  claim: string;
+  verdict: string;
+  remedy: string;
+}
+
+/**
+ * A fact about the company found inside an article about someone else, with no
+ * follow-up reporting behind it. A lead, not a finding.
+ */
+export interface LooseClaim {
+  claim: string;
+  source_url: string;
+  article_subject?: string | null;
+}
+
 export interface BriefingReport {
+  /** Every reported development, ordered: key events first, then newest. */
   news: ClaimModule;
+  /** Job postings: intent, not outcome. */
   hires: ClaimModule;
-  launches: ClaimModule;
-  open_questions: ClaimModule;
-  risks: ClaimModule;
+  /** What the evidence amounts to, and where the risk sits. */
+  analysis?: Analysis;
   executive_summary: ExecutiveSummary;
+  /** Only present on a later brief; absent on a first one. */
+  changes_since_previous?: RevisionNote[];
+  /** Only present when the audit rejected something. */
+  removed_claims?: AuditRemoval[];
+  /** Only present when the evidence held facts from other companies' articles. */
+  possible_facts?: LooseClaim[];
 }
 
 export interface EvidenceConflict {

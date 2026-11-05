@@ -27,3 +27,6 @@ bifrost/logs/
 # Local scratch copies of files under development. They are not part of the
 # source tree; the tracked file is the one under backend/ or frontend/.
 .wh_local/
+
+# Local trial output. Contains research dumps that are not part of the source.
+TEST/

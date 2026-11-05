@@ -22,14 +22,22 @@ logger = get_logger("article_subject")
 
 SUBJECT_PROMPT = """You decide which company each news excerpt is primarily about.
 
-You receive a list of excerpts and the company we care about. For each excerpt
-classify:
+You receive a list of excerpts, the company we care about, and optionally what
+the caller told us about that company. For each excerpt classify:
 - "primary": the excerpt reports on our company. Its numbers, decisions, results
   or actions are its subject.
-- "comparison": our company is a peer, rival, precedent or benchmark inside a
-  story about someone else.
+- "comparison": our company appears inside a story whose own subject is a
+  different company — as a peer, rival, precedent, benchmark, partner,
+  counterparty, customer or supplier. The deciding test is whose action the
+  sentence reports: "Zocdoc announced a partnership with Instinct" reports
+  Zocdoc's action, so it is comparison, even though our company is named twice.
 - "unrelated": our company is not a subject of this excerpt. A passing mention,
   a list of many banks, or a similarity in name does not count.
+
+Names collide. Several unrelated businesses can share one name, and each will
+report its own numbers, customers and hiring. When the caller described the
+company, an excerpt that matches a different same-named business is "unrelated",
+not "primary": attribute by what the excerpt describes, never by the name alone.
 
 Judge by what the opening sentences describe, not by whether the name appears.
 Reply with JSON only:
@@ -62,8 +70,15 @@ class ArticleRoute:
 async def classify_article_subjects(
     openings: Sequence[str],
     company: str,
+    description: str = "",
 ) -> List[ArticleRoute]:
     """Route each article by what it is about, not by whether it names us.
+
+    ``description`` is the caller's own wording for the company. It is the only
+    way to separate two businesses with the same name: a description such as
+    "San Francisco AI assistant startup" lets the model reject an excerpt about
+    a veterinary software company that also calls itself Instinct, which a bare
+    name cannot do.
 
     Falls back to "comparison" for everything when the model is unreachable: an
     article whose subject is unknown must not be allowed to write our fact base,
@@ -84,13 +99,18 @@ async def classify_article_subjects(
     if not numbered:
         return [ArticleRoute(index=i, subject="unrelated") for i in range(len(openings))]
 
+    described = " ".join((description or "").split())
+    context = f"COMPANY: {name}"
+    if described:
+        context += f"\nCALLER'S DESCRIPTION OF THAT COMPANY: {described}"
+
     try:
         client, model = build_client()
         response = await client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": SUBJECT_PROMPT},
-                {"role": "user", "content": f"COMPANY: {name}\n\nEXCERPTS:\n{numbered}"},
+                {"role": "user", "content": f"{context}\n\nEXCERPTS:\n{numbered}"},
             ],
             response_format={"type": "json_object"},
             temperature=0.0,

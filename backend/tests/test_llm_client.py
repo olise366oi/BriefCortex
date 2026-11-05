@@ -98,6 +98,48 @@ def test_no_credentials_raises(patched_settings):
         llm_client.build_client()
 
 
+@pytest.fixture(autouse=True)
+def clear_client_cache():
+    """Each test must build from its own settings, not a previously cached one."""
+    llm_client._CLIENT_CACHE.clear()
+    yield
+    llm_client._CLIENT_CACHE.clear()
+
+
+def test_repeated_calls_reuse_one_client(patched_settings):
+    # Callers build the client once per article; without reuse each page created
+    # a new connection pool (measured: 100+ selections on one briefing).
+    patched_settings(DEEPSEEK_API_KEY="direct-key")
+
+    first, _model = llm_client.build_client()
+    second, _model = llm_client.build_client()
+
+    assert first is second
+    assert len(llm_client._CLIENT_CACHE) == 1
+
+
+def test_a_changed_key_builds_a_new_client(patched_settings):
+    patched_settings(DEEPSEEK_API_KEY="key-one")
+    first, _model = llm_client.build_client()
+
+    patched_settings(DEEPSEEK_API_KEY="key-two")
+    second, _model = llm_client.build_client()
+
+    assert first is not second
+    assert second.api_key == "key-two"
+
+
+def test_switching_provider_builds_a_new_client(patched_settings):
+    patched_settings(DEEPSEEK_API_KEY="direct-key")
+    deepseek_client, _model = llm_client.build_client()
+
+    patched_settings(OPENAI_API_KEY="openai-key")
+    openai_client, model = llm_client.build_client()
+
+    assert deepseek_client is not openai_client
+    assert model == "gpt-4o-mini"
+
+
 def test_llm_route_reports_the_selected_path():
     assert _settings(GATEWAY_BASE_URL="http://gw/v1").llm_route == "gateway"
     assert _settings(DEEPSEEK_API_KEY="k").llm_route == "deepseek"

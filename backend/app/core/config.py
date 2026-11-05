@@ -10,7 +10,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Resolved against the module, not the process CWD, so the backend reads the
 # same .env whether it is started from the repo root or from backend/.
-ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+#
+# A real .env wins; .env.example is the fallback. The example file is committed
+# and already carries the shared development credentials, so the app runs from a
+# clean checkout without anyone copying it first. Machine-level environment
+# variables still override both, because pydantic-settings reads them last.
+ENV_FILES = (
+    Path(__file__).resolve().parents[2] / ".env",
+    Path(__file__).resolve().parents[2] / ".env.example",
+)
+ENV_FILE = ENV_FILES[0]
 
 
 class Settings(BaseSettings):
@@ -49,8 +58,27 @@ class Settings(BaseSettings):
             return "openai"
         return "none"
 
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def normalize_database_url(cls, value: object) -> object:
+        """Pin a bare ``postgresql://`` URL to the driver that is installed.
+
+        SQLAlchemy 2 resolves the bare scheme to psycopg 3, which needs libpq
+        and fails on a machine that only has psycopg2 (measured: "no pq wrapper
+        available" at import time). The committed URL is written bare, so it is
+        pointed at the psycopg2 driver here instead of forcing every caller to
+        rewrite it. An explicit ``+driver`` is always left alone.
+        """
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        if text.startswith("postgresql://"):
+            return "postgresql+psycopg2://" + text[len("postgresql://"):]
+        return value
+
     model_config = SettingsConfigDict(
-        env_file=ENV_FILE,
+        # Explicit precedence: env vars > .env > .env.example.
+        env_file=[str(path) for path in ENV_FILES],
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",

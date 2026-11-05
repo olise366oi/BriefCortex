@@ -142,11 +142,39 @@ DISCLAIMERS = (
 
 
 def hiring_queries(company: str) -> List[str]:
-    """Queries that surface a company's job postings and hiring news."""
+    """Queries that surface a company's job postings and hiring news.
+
+    Measured: a generic "company careers jobs openings" query returns other
+    companies' hiring stories and the company's marketing careers page, never an
+    actual posting (0 of 48 results were careers URLs worth reading). A query
+    phrased the way a job seeker types it does reach real posting detail pages,
+    which is where schema.org data lives, so those come first.
+    """
     return [
-        f"{company} careers jobs openings",
-        f"{company} job vacancies recruitment",
+        f"{company} engineer job opening apply",
+        f"{company} careers open positions apply now",
         f"{company} hiring expansion new roles",
+    ]
+
+
+# LinkedIn's own job board. Measured on the same query as the general search:
+# roughly five times the attributable role titles (587 vs 106 for AMD, 893 vs 44
+# for Zydus), at 1.9-4.5s instead of 0.3-0.6s. The trade is accepted because a
+# hiring lane with five roles is not a signal, and the wall-clock cost stays
+# inside the request budget.
+LINKEDIN_JOB_DOMAINS = ("linkedin.com/jobs",)
+
+
+def linkedin_hiring_queries(company: str) -> List[str]:
+    """Queries for the LinkedIn job board only.
+
+    Kept separate from hiring_queries because they run against a fixed domain
+    list: adding the domain to a general query would silently restrict every
+    other query that shares the list.
+    """
+    return [
+        f"{company} hiring jobs open roles",
+        f"{company} careers apply now position",
     ]
 
 
@@ -197,9 +225,16 @@ def is_careers_url(url: str) -> bool:
 def is_hiring_line(text: str) -> bool:
     """True when a single line states something about a role.
 
-    Requires a structured field label or an explicit apply invitation, and
-    rejects channel promos, career advice and hashtag spam. A market column
-    saying "jobs data" contains neither, so it never reaches the hiring lane.
+    Accepts three shapes, because a posting announces itself in three ways:
+    a structured field label ("Qualification:"), an explicit invitation to
+    apply ("apply now"), and a role title on its own ("Sr. Software Engineer —
+    GPU Kernelel Development"). The third shape is what a job board publishes
+    (measured: a LinkedIn jobs index lists role titles as headings and nothing
+    else), so requiring a field label discarded every posting on it.
+
+    Rejects channel promos, career advice and hashtag spam. A market column
+    saying "jobs data" contains none of the three shapes, so it never reaches the
+    hiring lane.
     """
     line = " ".join((text or "").split())
     if not line:
@@ -216,11 +251,105 @@ def is_hiring_line(text: str) -> bool:
     # A macro labour release is not a company's hiring plan.
     if any(marker in lowered for marker in LABOUR_STATISTICS):
         return False
+    # Compensation reporting, not a posting: "Senior software engineer: $160,158".
+    if SALARY_LINE_RE.search(line):
+        return False
     # Hashtag spam: mostly '#'-joined tokens.
     if lowered.count("#") >= 2:
         return False
 
-    has_field = any(match_word(lowered, label) for label in HIRING_FIELD_LABELS)
-    has_statement = any(phrase in lowered for phrase in HIRING_STATEMENTS)
+    # A structured field label counts only when it opens the line, the way a
+    # posting writes it ("Qualification: B.Sc."). A label appearing mid-sentence
+    # is body prose: "work in collaboration with other departments" is not a
+    # posting, and matching "department" anywhere let it through.
+    if _opens_with_field_label(line):
+        return True
 
-    return has_field or has_statement
+    if any(phrase in lowered for phrase in HIRING_STATEMENTS):
+        return True
+
+    return _looks_like_role_title(line)
+
+
+def _opens_with_field_label(line: str) -> bool:
+    """True when the line starts with a field label followed by content.
+
+    The label must be followed by a separator a posting actually writes
+    ("Qualification: ...", "**Experience:** ..."). A sentence that merely begins
+    with the word ("Experience in people management") is body prose, and treating
+    it as a posting let requirement bullets into the hiring lane.
+    """
+    for label in HIRING_FIELD_LABELS:
+        # Two separators a posting actually writes: "Qualification: ..." and
+        # "**Job location** Ankleshwar". A sentence that merely begins with the
+        # word ("Experience in people management") has neither.
+        pattern = re.compile(
+            rf"^[\W_]*{re.escape(label)}(?:e?s)?[\W_]*(?:[:\-\u2013\uff1a]|\*\*)[\W_]*(\S.*)$",
+            re.IGNORECASE,
+        )
+        match = pattern.match(line)
+        if match and len(match.group(1).strip()) >= MIN_ROLE_TITLE_CHARS:
+            return True
+    return False
+
+
+# Role nouns that name a job rather than describe a news event.
+ROLE_TITLE_NOUNS = (
+    "engineer", "manager", "director", "analyst", "specialist", "developer",
+    "architect", "designer", "consultant", "intern", "officer", "lead",
+    "scientist", "recruiter", "administrator", "coordinator", "supervisor",
+    "technician", "associate", "executive", "controller", "accountant",
+)
+
+# A line carrying these is reporting an event, not advertising a role. Without
+# this guard "AMD appoints new chief financial officer" reads as a posting.
+ROLE_TITLE_REJECTS = (
+    "appointed", "appoints", "named", "names", "resigned", "resigns",
+    "stepped down", "steps down", "hired as", "promoted", "promotes",
+    "said", "says", "announced", "announces", "reported", "reports",
+    "according to", "will ", "has ", "have ",
+    # Board chrome that counts roles rather than naming one: a jobs index
+    # publishes "7,000+ Amd Technical Project Manager Jobs in United States".
+    " jobs in ", "jobs)", "open roles", "job openings", "get notified",
+    # Verbs a posting's body uses. A role title is a noun phrase.
+    "work in", "collaborate", "responsible for", "minimum", "preferred",
+    "experience in", "experience with", "experience developing",
+    "sign in", "job alerts",
+    "associated members", "open roles for", "currently ",
+)
+
+# A salary band on a company profile page ("Principal systems software
+# engineer: $240,000") names a role and a number, but it is compensation
+# reporting rather than an open posting. Measured on a LinkedIn company page:
+# most of its "roles" were these wage summaries.
+SALARY_LINE_RE = re.compile(
+    r"\$\s?\d[\d,]*(?:\s*(?:-|–|to)\s*\$\s?\d[\d,]*)?(?:\s*(?:/|per)\s*\w+)?",
+    re.IGNORECASE,
+)
+
+# A role title is short. A paragraph that happens to contain "engineer" is prose.
+MAX_ROLE_TITLE_CHARS = 120
+
+# Lines this short are section headings on a posting ("Requirements",
+# "Responsibilities"), not the role itself. A real title carries words.
+MIN_ROLE_TITLE_CHARS = 12
+
+
+def _looks_like_role_title(line: str) -> bool:
+    """True when the line reads as a job title rather than as a sentence."""
+    if not (MIN_ROLE_TITLE_CHARS <= len(line) <= MAX_ROLE_TITLE_CHARS):
+        return False
+
+    lowered = line.lower()
+    if any(marker in lowered for marker in ROLE_TITLE_REJECTS):
+        return False
+
+    # A title is a noun phrase. A sentence carries a verb after its subject, and
+    # a posting's body ("Lead development of characterisation methodologies")
+    # reads as prose, not as a role.
+    if re.search(r"(?<![a-z0-9])(work|collaborate|lead|manage|develop|provide|"
+                 r"ensure|support|perform|requires|minimum|experience|"
+                 r"join|apply)(?![a-z0-9])", lowered):
+        return False
+
+    return any(match_word(lowered, noun) for noun in ROLE_TITLE_NOUNS)

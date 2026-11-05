@@ -102,6 +102,33 @@ class BriefingRepository:
         )
         return self.db.scalars(stmt).first()
 
+    def find_by_fingerprint(
+        self,
+        company_name: str,
+        evidence_fingerprint: str,
+    ) -> Optional[BriefingRecord]:
+        """Return a completed brief built from this exact evidence set.
+
+        Keyed on the evidence, not the calendar: a meeting one day later with the
+        same facts behind it is the same brief, and the calendar-keyed lookup
+        could never see that. The company name is still required, because the
+        same evidence text under a different company is a different brief.
+        """
+        if not evidence_fingerprint:
+            return None
+
+        stmt = (
+            select(BriefingRecord)
+            .where(
+                BriefingRecord.company_name == company_name,
+                BriefingRecord.evidence_fingerprint == evidence_fingerprint,
+                BriefingRecord.status == BriefingJobStatus.COMPLETED.value,
+            )
+            .order_by(BriefingRecord.created_at.desc())
+            .limit(1)
+        )
+        return self.db.scalars(stmt).first()
+
     def update(
         self,
         briefing_id: uuid.UUID,
@@ -110,6 +137,7 @@ class BriefingRepository:
         report: Optional[dict[str, Any]] = None,
         evidence: Optional[dict[str, Any]] = None,
         error: Optional[str] = None,
+        evidence_fingerprint: Optional[str] = None,
     ) -> Optional[BriefingRecord]:
         record = self.get_by_id(briefing_id)
         if record is None:
@@ -123,6 +151,8 @@ class BriefingRepository:
             record.evidence = evidence
         if error is not None:
             record.error = error
+        if evidence_fingerprint is not None:
+            record.evidence_fingerprint = evidence_fingerprint
 
         self.db.commit()
         self.db.refresh(record)

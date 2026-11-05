@@ -74,6 +74,14 @@ export function SectionCard({ title, tone, icon, items }: SectionCardProps) {
                 <span className="font-body text-sm font-medium text-ink">
                   {stripUnverifiedTag(item.claim)}
                 </span>
+                {item.key_event ? (
+                  <span className="clay-token bg-coral text-white font-body font-bold text-xs px-2.5 py-0.5">
+                    Key
+                  </span>
+                ) : null}
+                {item.date ? (
+                  <span className="font-mono text-xs text-ink/50">{item.date}</span>
+                ) : null}
                 {unverified ? (
                   <span className="clay-token bg-butter text-ink font-body font-bold text-xs px-2.5 py-0.5">
                     Unverified

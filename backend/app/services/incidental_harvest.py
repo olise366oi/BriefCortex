@@ -19,6 +19,25 @@ PROVENANCE_CORROBORATED = "corroborated"
 PROVENANCE_UNVERIFIED = "unverified"
 
 
+def _article_subject(result: dict, clean_text: str) -> str:
+    """Return the company the article is about, as its headline states it.
+
+    The headline is the publisher's own claim about the subject, so it is the
+    most reliable short answer to "whose story is this?". When the headline is
+    unusable the opening sentence stands in. An empty string is returned rather
+    than a guess.
+    """
+    title = " ".join(str(result.get("title") or "").split())
+    if title:
+        # Publishers append the outlet name; keep the headline part only.
+        head = re.split(r"\s(?:-|—|\|)\s", title)[0].strip()
+        if head:
+            return head[:120]
+
+    opening = opening_sentence(clean_text)
+    return " ".join(opening.split())[:120]
+
+
 async def harvest_incidental_facts(
     articles: Sequence[dict],
     company: str,
@@ -50,6 +69,12 @@ async def harvest_incidental_facts(
         if not url or not clean_text:
             continue
 
+        # The headline names who the article is about, so a reader can see at a
+        # glance that this sentence came out of someone else's story. Storing a
+        # routing label ("primary") here told the reader nothing: every lead read
+        # "from an article about primary".
+        subject = _article_subject(article.get("result") or {}, clean_text)
+
         sentences = extract_incidental_sentences(
             clean_text,
             name,
@@ -63,6 +88,7 @@ async def harvest_incidental_facts(
                 "url": url,
                 "clean_text": clean_text,
                 "opening": opening_sentence(clean_text),
+                "subject": subject,
                 "sentences": sentences,
                 "publish_date": parse_publish_date(
                     (article.get("result") or {}).get("published_date")
@@ -108,9 +134,7 @@ async def harvest_incidental_facts(
                         content=sentence.content,
                         source_url=candidate["url"],
                         publish_date=candidate["publish_date"],
-                        article_subject=(
-                            "primary" if sentence.is_subject else "passing mention"
-                        ),
+                        article_subject=candidate["subject"],
                         provenance=PROVENANCE_UNVERIFIED,
                     )
                 )

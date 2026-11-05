@@ -31,6 +31,12 @@ class BriefingRecord(Base):
     # Provenance stored beside the report: the conflicts the engine found and
     # the commentary the fact split withheld from the model.
     evidence: Mapped[Optional[Dict[str, Any]]] = mapped_column(JsonColumn, nullable=True)
+    # Digest of the evidence this brief was built from. A later request whose
+    # facts match can reuse this report even if its meeting date differs, which
+    # the calendar-keyed cache could not do.
+    evidence_fingerprint: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, index=True
+    )
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

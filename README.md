@@ -112,7 +112,11 @@ Retrieval is not a single query against a flat domain list.
 
 **Reading.** Hard facts are the opening three paragraphs plus the closing paragraph. Middle paragraphs contribute only their first sentence, and only when it carries a negative signal — so the fact base gets the leverage without absorbing the commentator's framing. Signals are matched on word boundaries plus inflections, so `miss` cannot fire inside `mission`.
 
-**Depth.** Coverage stops on two budgets. A round must contribute previously unseen URLs that carry an article body, otherwise the loop exits (`MIN_USABLE_PER_ROUND`); the loop also stops at `SEARCH_BUDGET_SECONDS` so a request returns inside the client's poll window, with `MAX_SEARCH_ROUNDS=8` guarding a runaway plan. Tavily returns 10 results by default and accepts 20; above 20 the response is unreliable (measured: 25 → 16, 30 → 1), so extra coverage comes from more queries rather than a larger page size. If a publisher returns results without bodies, it is dropped and the same queries re-run once, so a syndicated telling can take the slot an empty page was holding.
+`include_raw_content=True` is what supplies the body, and it returns page markdown. The `"text"` variant is measurably worse: plain text has no headings and no paragraph breaks, so Trafilatura rejected every listed-publisher article outright (measured: 5 of 5 dropped, 0 chars). The markdown mode keeps 8 of 10 on the same query. Plain text is still handled when a publisher sends it, by rebuilding paragraphs from the prose lines instead of discarding the article.
+
+**Depth.** Coverage stops on two budgets. A round must contribute previously unseen URLs that carry an article body, otherwise the loop exits (`MIN_USABLE_PER_ROUND`); the loop also stops at `SEARCH_BUDGET_SECONDS` so a request returns inside the client's poll window, with `MAX_SEARCH_ROUNDS=8` guarding a runaway plan. Tavily returns 10 results by default and accepts 20; above 20 the response is unreliable (measured: 25 → 16, 30 → 1), so extra coverage comes from more queries rather than a larger page size.
+
+**Body recovery.** A search result can point at a page whose body the crawler did not return. Rather than only dropping that publisher and re-running the queries, the empty URLs are fetched directly first: `Tavily extract` on the specific URL recovers the story behind an already-relevant result (measured: a shell recovered to 24,892 chars). The drop-and-re-run pass still follows, but only when coverage is still short after recovery.
 
 **Deduplication.** An identical sentence is stored once. A syndicated re-run that extends the stored sentence word for word replaces it, but only when the shared opening is long enough to be the same telling — two different facts that happen to open with the same clause both stay.
 
@@ -143,6 +147,22 @@ company + objective + meeting date. An identical request inside the TTL returns
 the stored brief instead of paying for retrieval and inference again. Meeting
 time is keyed to the day, because the evidence window is anchored to the date —
 two meetings on one day produce the same brief.
+
+**Evidence-keyed reuse** (`services/evidence_fingerprint.py`). The request cache
+above misses whenever a meeting moves by a day, even if nothing about the company
+changed, which is why the hit rate was low. A brief is actually derived from its
+evidence, so the evidence gets its own fingerprint — over the facts, the postings,
+the objective and the company description, and deliberately not over the date. A
+later run whose facts match reuses the stored brief and skips inference entirely.
+
+**Cache invalidation** (`services/cache_invalidation.py`). Reuse is only safe
+while the evidence still says the same thing, and the fingerprint cannot see a
+contradiction because each fact in it was correct when written. So before a stored
+brief is served, the old and new fact sets are checked against each other with
+the same deterministic conflict engine used everywhere else. A brief written while
+the company was hiring is wrong the moment a layoff is reported: the contradiction
+invalidates the reuse and the brief is regenerated. The check is regex-based and
+cross-item only, so it costs microseconds and needs no model.
 
 **Content-aware TTL headers** (`services/bifrost_headers.py`). When a request
 does reach a model, the evidence decides how long the response may be cached.
@@ -219,13 +239,16 @@ BriefCortex/
 | `services/incidental*.py` | Facts about us found inside other companies' coverage |
 | `services/corroboration.py` | Targeted follow-up search for an incidental fact |
 | `services/hiring.py` | Line-level hiring detection, careers-URL matching and hiring queries |
-| `services/job_postings.py` | Reads roles from a careers page's schema.org `JobPosting` markup |
+| `services/job_postings.py` | Reads roles from a careers page's schema.org `JobPosting` markup, including per-platform detail-link discovery |
 | `services/dedup.py` | Two-stage fact merging that keeps every source |
 | `services/retention.py`, `scheduler.py` | Evidence expiry and URL decay, run on a daily loop |
 | `services/cache.py` | Exact-request cache key and TTL |
+| `services/evidence_fingerprint.py` | Evidence-set fingerprint, so a brief is reused when the facts match |
+| `services/cache_invalidation.py` | Cross-set contradiction check that invalidates a reusable brief |
 | `services/analysis.py` | LLM report generation and prompt assembly |
 | `services/conflict_detection.py` | Deterministic fact conflict engine |
 | `services/bifrost_headers.py` | Content-aware cache key and TTL derived from the evidence |
+| `services/llm_client.py` | Provider selection, retry policy, and the cached client every caller shares |
 | `services/keywords.py`, `urls.py`, `window.py` | Shared matchers, URL parsing, meeting-anchored window |
 | `repositories/` | Postgres data access only |
 | `core/` | Settings, DB engine/session, connection checks |
@@ -246,11 +269,11 @@ BriefCortex/
 
 1. **Async accept + poll** — generation takes seconds; `202` + polling keeps the UI responsive without websockets. Jobs are held in a task set so the event loop cannot collect them mid-run, and a job stuck in `processing` is failed on next startup.
 2. **Subject routing, not name matching** — an article that merely names the company is not about the company. Each article is routed by its subject before any fact is trusted, which is what stopped a competitor's reporting being filed as ours.
-3. **Hiring is its own lane** — a posting states intent, not outcome, so it informs the model without being asserted as a reported fact. The decision is made per line and per structured posting, never per page: a markets column mentioning "jobs data" and a careers page's apply buttons are both furniture.
+3. **Hiring is its own lane** — a posting states intent, not outcome, so it informs the model without being asserted as a reported fact. The decision is made per line and per structured posting, never per page: a markets column mentioning "jobs data" and a careers page's apply buttons are both furniture. Postings are found by reading schema.org `JobPosting` blocks, because a careers board renders its listings in JavaScript and its index page usually carries none (measured: 0 on Lever, Greenhouse, SmartRecruiters and iCIMS indexes). Detail pages do carry them, so the board index is crawled for per-platform link shapes — Lever `/{org}/{uuid}`, SmartRecruiters `/{org}/{digits}-{slug}`, iCIMS `/jobs/{digits}`, slug boards `/jobs/{dept}/{city}/{role-slug}` — and a few detail pages are opened. Hiring queries run **undated**: a posting has no publish date, so restricting them to the evidence window excluded almost every real posting (measured: 1 careers URL with the window versus 9 without).
 4. **One fact, every source** — the same fact from five outlets is stored once with all five links. Coverage count is not the claim's value.
 5. **Conflict detection stays off the LLM path** — conflicts are computed independently and served beside the report, never inside the prompt.
 6. **Postgres + repository** — each briefing is a row keyed by UUID; the report lives in one JSONB column.
-7. **One configuration channel** — every key is read through `app/core/config.py`, and the `.env` path is resolved against the module.
+7. **One configuration channel** — every key is read through `app/core/config.py`. The `.env` path is resolved against the module, and `.env.example` is read as a fallback so a clean checkout runs without anyone copying it first; real environment variables still win. A bare `postgresql://` URL is pinned to the installed driver, because SQLAlchemy 2 resolves it to psycopg 3, which needs libpq and fails at import on a machine that has psycopg2.
 8. **Schema changes go through Alembic** — `init_db()` only checks connectivity and warns when the revision is behind; it never alters tables.
 
 ## Anti-patterns
@@ -260,7 +283,7 @@ BriefCortex/
 - Do not put SQL in services — go through repositories.
 - Do not feed conflict-detection output into the LLM prompt.
 - Do not let unverified commentary become a numeric ask in `executive_summary.recommendation`.
-- Do not gate an article on whether the company name appears; ask what the article is about.
+- Do not gate an article on whether the company name appears; ask what the article is about. When the name *is* used as a cheap pre-filter, match every name the company is known by — a ticker-only check silently discards "International Business Machines" when the caller searched "IBM".
 
 ---
 
@@ -306,7 +329,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 202 passed.
+Expected: 286 passed.
 
 > Test count is maintained locally while the frontend suite is still being
 > written; the shared baseline will be the sum of this backend count and whatever

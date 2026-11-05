@@ -6,8 +6,20 @@ from app.services.analysis import BriefingReport, SYSTEM_PROMPT
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ANALYSIS_SOURCE = PROJECT_ROOT / "app" / "services" / "analysis.py"
 
-SECTIONS = ["news", "hires", "launches", "open_questions", "risks"]
+SECTIONS = ["news", "hires"]
 SUMMARY_SECTION = "executive_summary"
+ANALYSIS_SECTION = "analysis"
+# Present only when a later brief has to state where it differs from an earlier
+# one, so it is part of the schema but not part of the first brief's shape.
+REVISION_SECTION = "changes_since_previous"
+# Filled by the audit after generation, never by the model, so it is deliberately
+# absent from the prompt schema: a model that could write this field could claim
+# it had been audited.
+AUDIT_SECTION = "removed_claims"
+# Filled from the fact base's incidental lane: facts about us found inside articles
+# about other companies. Also absent from the prompt, so the model never presents
+# an unconfirmed sentence as a finding.
+POSSIBLE_SECTION = "possible_facts"
 
 
 def _prompt_schema_block() -> str:
@@ -16,8 +28,55 @@ def _prompt_schema_block() -> str:
 
 def test_top_level_keys_match():
     real_top = list(BriefingReport.model_json_schema()["properties"].keys())
-    expected = SECTIONS + [SUMMARY_SECTION]
+    expected = [
+        "news",
+        "hires",
+        ANALYSIS_SECTION,
+        SUMMARY_SECTION,
+        REVISION_SECTION,
+        AUDIT_SECTION,
+        POSSIBLE_SECTION,
+    ]
     assert real_top == expected, real_top
+
+
+def test_analysis_is_documented_in_the_prompt():
+    block = _prompt_schema_block()
+    assert re.search(
+        r'"analysis":\s*\{"assessment":\s*str,\s*"risks":\s*\[str\]\}', block
+    ), "analysis missing from the prompt schema block"
+
+
+def test_the_analysis_field_is_not_a_second_recommendation():
+    # The reader must get the assessment before the advice, which only holds if
+    # analysis is a different field from executive_summary.
+    assert ANALYSIS_SECTION != SUMMARY_SECTION
+    real = BriefingReport.model_json_schema()
+    ref = real["properties"][ANALYSIS_SECTION]["$ref"].split("/")[-1]
+    assert set(real["$defs"][ref]["properties"].keys()) == {"assessment", "risks"}
+
+
+def test_the_audit_field_is_never_requested_from_the_model():
+    # removed_claims is produced by report_audit, not by the generator. Asking the
+    # model for it would let a reply declare itself clean.
+    assert AUDIT_SECTION not in _prompt_schema_block()
+
+
+def test_possible_facts_are_never_requested_from_the_model():
+    # These come from the incidental lane, which the prompt never sees at all.
+    assert POSSIBLE_SECTION not in _prompt_schema_block()
+
+def test_the_audit_field_is_never_requested_from_the_model():
+    # removed_claims is produced by report_audit, not by the generator. Asking the
+    # model for it would let a reply declare itself clean.
+    assert AUDIT_SECTION not in _prompt_schema_block()
+
+
+def test_revision_field_is_documented_in_the_prompt():
+    assert re.search(
+        r'"%s":\s*\[\{"change": str, "why": str\}\]' % REVISION_SECTION,
+        _prompt_schema_block(),
+    ), "changes_since_previous missing from the prompt schema block"
 
 
 def test_section_shape_match():
@@ -34,8 +93,12 @@ def test_section_shape_match():
 def test_claim_fields_match():
     real = BriefingReport.model_json_schema()
     claim_props = list(real["$defs"]["Claim"]["properties"].keys())
-    assert claim_props == ["claim", "source_url"], claim_props
-    assert re.search(r'\{"claim": str, "source_url": str\}', _prompt_schema_block())
+    # date and key_event exist so news can be delivered as an ordered timeline.
+    assert claim_props == ["claim", "source_url", "date", "key_event"], claim_props
+    assert re.search(
+        r'\{"claim": str, "source_url": str, "date": str, "key_event": bool\}',
+        _prompt_schema_block(),
+    )
 
 
 def test_executive_summary_fields_match():
