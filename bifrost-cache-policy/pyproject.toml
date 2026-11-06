@@ -7,6 +7,7 @@ name = "bifrost-cache-policy"
 version = "0.1.0"
 description = "Evidence-derived cache keys, graded TTLs and cross-set invalidation for the Bifrost AI gateway"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = []
 classifiers = [
