@@ -189,26 +189,31 @@ JURISDICTION_COUNTRY: Dict[str, str] = {
 }
 
 
-MEDIA_LIST_PROMPT = """You name the established press of one country.
+MEDIA_LIST_PROMPT = """You name the established press of one country, and the language
+those outlets publish in.
 
-You receive a country. Return the news outlets that a professional reader in that
-country's business community would consider serious reporting, in descending order
-of authority for business and corporate news.
+You receive a country. Return:
+1. The news outlets a professional reader in that country's business community
+   would consider serious reporting on companies, in descending order of
+   authority. Only real, currently-published news organisations: no social
+   platforms, no forums, no job boards, no company directories, no price-aggregator
+   pages. Business dailies and the business desks of national newspapers first.
+   Domains only, bare host, no scheme and no path: "nikkei.com".
+2. The language those outlets actually publish in, as an ISO 639-1 code
+   ("ja", "de", "fr", "zh", "en", ...). This is the language of the business
+   press, not the country's every language.
+3. Between 6 and 12 topic terms in that language, for company news: the words a
+   local journalist would use for earnings, guidance, pricing, contract,
+   capacity, layoffs, investment, regulation. These become search terms, so they
+   must be the words that appear in local coverage, not translations of English
+   phrasing.
 
-Rules:
-- Only real, currently-published news organisations. No social platforms, no
-  forums, no job boards, no company directories, no price-aggregator pages.
-- Prefer the outlets that actually report company news: business dailies and the
-  business desks of national newspapers first, then general national press.
-- Domains only, bare host, no scheme and no path: "nikkei.com", not
-  "https://www.nikkei.com/".
-- Between 8 and 20 entries. Quality over quantity: if you know ten, return ten.
-- If you do not know that country's press well, return FEWER entries. A short
-  accurate list beats a long guessed one.
+If you do not know the country's press well, return FEWER entries and say so in
+the note. A short accurate list beats a long guessed one.
 
 Reply with JSON only:
-{"country": str, "domains": [str], "confidence": "high|medium|low",
- "note": "one short sentence"}"""
+{"country": str, "domains": [str], "language": str, "topic_terms": [str],
+ "confidence": "high|medium|low", "note": "one short sentence"}"""
 
 
 @dataclass
@@ -222,6 +227,11 @@ class MediaPolicy:
     source: str = "none"
     confidence: str = "low"
     note: str = ""
+    # The language those national outlets publish in, and topic terms in that
+    # language. An English query on Japanese domains mostly returns the English
+    # edition of one title; a query in the local language reaches the local desks.
+    language: str = ""
+    topic_terms: Tuple[str, ...] = ()
 
     def tier_of(self, url_or_host: str) -> str:
         """Return the trust tier for one host."""
@@ -392,6 +402,19 @@ async def generate_media_list(jurisdiction: str) -> MediaPolicy:
     confidence = str(payload.get("confidence") or "low").lower()
     note = str(payload.get("note") or "")[:200]
 
+    # The language the local business press publishes in, and topic terms in that
+    # language. An English query on Japanese domains mostly returns the English
+    # edition of one title; a query in the local language reaches the local desks.
+    language = str(payload.get("language") or "").strip().lower()
+    if not re.fullmatch(r"[a-z]{2,3}", language):
+        language = ""
+    raw_terms = payload.get("topic_terms") or []
+    topic_terms = tuple(
+        term.strip()
+        for term in (raw_terms if isinstance(raw_terms, (list, tuple)) else [])
+        if isinstance(term, str) and term.strip() and len(term.strip()) <= 30
+    )[:12]
+
     if not domains:
         logger.info("Media list empty after validation | jurisdiction=%s", code)
         return MediaPolicy(
@@ -404,6 +427,8 @@ async def generate_media_list(jurisdiction: str) -> MediaPolicy:
     entry = {
         "country": country,
         "domains": list(domains),
+        "language": language,
+        "topic_terms": list(topic_terms),
         "confidence": confidence,
         "note": note,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -412,8 +437,8 @@ async def generate_media_list(jurisdiction: str) -> MediaPolicy:
 
     logger.info(
         "Media list generated and stored | jurisdiction=%s | country=%s | "
-        "domains=%s | confidence=%s",
-        code, country, len(domains), confidence,
+        "domains=%s | language=%s | terms=%s | confidence=%s",
+        code, country, len(domains), language or "?", len(topic_terms), confidence,
     )
     return MediaPolicy(
         jurisdiction=code,
@@ -422,6 +447,8 @@ async def generate_media_list(jurisdiction: str) -> MediaPolicy:
         source="generated",
         confidence=confidence,
         note=note,
+        language=language,
+        topic_terms=topic_terms,
     )
 
 
@@ -489,12 +516,225 @@ async def infer_jurisdiction(company: str) -> Optional[str]:
     return code
 
 
+LOCAL_QUERY_PROMPT = """You write search queries in the local language for one company.
+
+You receive a company name, its country, the language its business press publishes
+in, and a list of topic terms in that language. Write queries that a local
+journalist's own words would match.
+
+Rules:
+- Write in {language_name}. Do not translate English phrasing: use the words that
+  appear in local coverage of companies.
+- Each query combines the company name (as it is written locally, when you know
+  it) with one or two topic terms.
+- Between 2 and {max_queries} queries. Short, keyword-style, not sentences.
+- Cover the topics that reveal business position: results, guidance, pricing,
+  contract terms, capacity, layoffs, investment, regulation.
+- If you do not know how the company is written locally, keep the name as given.
+
+Reply with JSON only:
+{{"local_name": str, "queries": [str]}}"""
+
+LANGUAGE_NAMES = {
+    "ja": "Japanese", "zh": "Chinese", "ko": "Korean", "de": "German",
+    "fr": "French", "es": "Spanish", "it": "Italian", "pt": "Portuguese",
+    "nl": "Dutch", "sv": "Swedish", "da": "Danish", "fi": "Finnish",
+    "no": "Norwegian", "pl": "Polish", "cs": "Czech", "el": "Greek",
+    "tr": "Turkish", "ru": "Russian", "ar": "Arabic", "he": "Hebrew",
+    "th": "Thai", "vi": "Vietnamese", "id": "Indonesian", "ms": "Malay",
+    "hi": "Hindi", "en": "English",
+}
+
+
+def _language_name(code: str) -> str:
+    return LANGUAGE_NAMES.get(code, code or "the local language")
+
+
+async def generate_local_queries(
+    company: str,
+    policy: MediaPolicy,
+    max_queries: int = 3,
+) -> List[str]:
+    """Write search queries in the language the local business press publishes in.
+
+    Measured: an English query restricted to Japanese domains returned the English
+    edition of one title and little else, while a query in Japanese against the
+    same domains returned nine results with usable bodies, including the national
+    wire. The local language is not a nicety — it is what reaches the desks that
+    actually report the company.
+
+    Returns an empty list when the policy carries no language: an untranslated
+    query is better than a bad translation, and the English plan still runs.
+    """
+    language = (policy.language or "").strip().lower()
+    if not language or language == "en":
+        return []
+
+    from app.services.llm_client import build_client
+
+    terms = ", ".join(policy.topic_terms[:10])
+    user_message = (
+        f"COMPANY: {company}\n"
+        f"COUNTRY: {policy.jurisdiction or '?'}\n"
+        f"LANGUAGE: {language} ({_language_name(language)})\n"
+        f"TOPIC TERMS IN THAT LANGUAGE: {terms or '(none supplied)'}\n\n"
+        "Write the queries."
+    )
+
+    try:
+        client, model = build_client()
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": LOCAL_QUERY_PROMPT.format(
+                        language_name=_language_name(language),
+                        max_queries=max_queries,
+                    ),
+                },
+                {"role": "user", "content": user_message},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1,
+        )
+        payload = json.loads(response.choices[0].message.content or "")
+    except Exception as exc:
+        logger.warning(
+            "Local query generation failed | company=%r | language=%s | %s",
+            company, language, exc,
+        )
+        return []
+
+    if not isinstance(payload, dict):
+        logger.info(
+            "Local query reply was not an object | company=%r | type=%s",
+            company, type(payload).__name__,
+        )
+        return []
+
+    if not isinstance(payload, dict):
+        return []
+
+    raw_queries = payload.get("queries") or []
+    queries: List[str] = []
+    for item in raw_queries if isinstance(raw_queries, (list, tuple)) else []:
+        text = str(item or "").strip()
+        if not text or len(text) > 160:
+            continue
+        if text not in queries:
+            queries.append(text)
+        if len(queries) >= max_queries:
+            break
+
+    logger.info(
+        "Local queries generated | company=%r | language=%s | local_name=%r | "
+        "queries=%s",
+        company,
+        language,
+        str(payload.get("local_name") or "")[:60],
+        queries,
+    )
+    return queries
+
+
+LANGUAGE_ONLY_PROMPT = """You name the language one country's business press
+publishes in, and the topic terms a local journalist would use.
+
+You receive a country and the outlets already validated as its national press.
+Return:
+1. The language those outlets publish in, as an ISO 639-1 code ("ja", "de", "fr",
+   "zh", "en", ...). This is the language of the business press.
+2. Between 6 and 12 topic terms in that language, for company news: the words a
+   local journalist writes for earnings, guidance, pricing, contract, capacity,
+   layoffs, investment, regulation. They become search terms, so they must be the
+   words that appear in local coverage.
+
+Reply with JSON only:
+{"language": str, "topic_terms": [str]}"""
+
+
+async def _enrich_language(
+    code: str,
+    stored: dict,
+    domains: Tuple[str, ...],
+) -> Optional[MediaPolicy]:
+    """Add the language and local topic terms to an already-stored press list."""
+    country = stored.get("country") or JURISDICTION_COUNTRY.get(code) or code
+
+    from app.services.llm_client import build_client
+
+    try:
+        client, model = build_client()
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": LANGUAGE_ONLY_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"COUNTRY: {country}\n"
+                        f"NATIONAL PRESS: {', '.join(domains[:10])}"
+                    ),
+                },
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+        )
+        payload = json.loads(response.choices[0].message.content or "")
+    except Exception as exc:
+        logger.warning("Language enrichment failed | jurisdiction=%s | %s", code, exc)
+        return None
+
+    language = str(payload.get("language") or "").strip().lower()
+    if not re.fullmatch(r"[a-z]{2,3}", language):
+        return None
+
+    raw_terms = payload.get("topic_terms") or []
+    topic_terms = tuple(
+        term.strip()
+        for term in (raw_terms if isinstance(raw_terms, (list, tuple)) else [])
+        if isinstance(term, str) and term.strip() and len(term.strip()) <= 30
+    )[:12]
+
+    updated = dict(stored)
+    updated.update(
+        {
+            "domains": list(domains),
+            "language": language,
+            "topic_terms": list(topic_terms),
+            "enriched_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    _STORE.put(code, updated)
+
+    logger.info(
+        "Media list upgraded with language | jurisdiction=%s | language=%s | terms=%s",
+        code, language, len(topic_terms),
+    )
+    return MediaPolicy(
+        jurisdiction=code,
+        national=domains,
+        jurisdiction_known=True,
+        source="stored",
+        confidence=str(stored.get("confidence") or "low"),
+        note=str(stored.get("note") or ""),
+        language=language,
+        topic_terms=topic_terms,
+    )
+
+
 async def resolve_policy(jurisdiction: Optional[str]) -> MediaPolicy:
     """Return the trust order for a company, generating the list if needed.
 
     A stored list is reused; a missing one is generated once and kept. Generation
     costs one model call per country, which is why it is stored rather than
     repeated per request.
+
+    A stored entry that predates the language field is **upgraded** rather than
+    used as-is: the domains are still good, but without the language there are no
+    local queries, and an English query on Japanese domains returns the English
+    edition of one title.
     """
     code = (jurisdiction or "").strip().upper().split("-")[0]
     if not code:
@@ -507,9 +747,27 @@ async def resolve_policy(jurisdiction: Optional[str]) -> MediaPolicy:
     if stored and stored.get("domains"):
         domains = believe_domains(stored["domains"])
         if domains:
+            language = str(stored.get("language") or "").strip().lower()
+            if not re.fullmatch(r"[a-z]{2,3}", language):
+                language = ""
+            raw_terms = stored.get("topic_terms") or []
+            topic_terms = tuple(
+                term.strip()
+                for term in (raw_terms if isinstance(raw_terms, (list, tuple)) else [])
+                if isinstance(term, str) and term.strip()
+            )[:12]
+
+            if not language:
+                # Upgrade in place: keep the validated domains, ask only for the
+                # language and the local topic terms.
+                upgraded = await _enrich_language(code, stored, domains)
+                if upgraded is not None:
+                    return upgraded
+
             logger.info(
-                "Media list loaded from store | jurisdiction=%s | domains=%s",
-                code, len(domains),
+                "Media list loaded from store | jurisdiction=%s | domains=%s | "
+                "language=%s | terms=%s",
+                code, len(domains), language or "?", len(topic_terms),
             )
             return MediaPolicy(
                 jurisdiction=code,
@@ -518,6 +776,8 @@ async def resolve_policy(jurisdiction: Optional[str]) -> MediaPolicy:
                 source="stored",
                 confidence=str(stored.get("confidence") or "low"),
                 note=str(stored.get("note") or ""),
+                language=language,
+                topic_terms=topic_terms,
             )
 
     return await generate_media_list(code)

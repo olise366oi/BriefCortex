@@ -54,7 +54,12 @@ from app.services.keywords import match_word
 from app.services.urls import host_of
 from app.services.incidental_harvest import harvest_incidental_facts
 from app.services.legal_signals import legal_queries
-from app.services.media_trust import infer_jurisdiction, order_by_trust, resolve_policy
+from app.services.media_trust import (
+    generate_local_queries,
+    infer_jurisdiction,
+    order_by_trust,
+    resolve_policy,
+)
 from app.services.logger_service import get_logger
 from app.services.publisher_filter import extract_clean_text, host_of
 from app.services.search_planner import SearchPlan, plan_searches
@@ -265,6 +270,8 @@ async def _search_plan(
     open_queries: Optional[List[str]] = None,
     aliases: Optional[List[str]] = None,
     linkedin_queries: Optional[List[str]] = None,
+    local_queries: Optional[List[str]] = None,
+    local_domains: Optional[List[str]] = None,
 ) -> List[dict]:
     """Run the planned queries until two consecutive rounds bring nothing new.
 
@@ -277,6 +284,12 @@ async def _search_plan(
     registry lists news outlets and some answers only exist outside them: a
     regulator's own case page is not a publisher. Their results enter the same
     dedup pool, so an outlet telling is still preferred by publisher priority.
+
+    ``local_queries`` are written in the company's own country's language and run
+    only against that country's domains (``local_domains``). Keeping the domain
+    scope tight is what makes them worth running: in the local language, a general
+    search returns local blogs and message boards, while the same query against
+    established national press returns reporting.
 
     Two budgets also apply: MAX_SEARCH_ROUNDS guards a runaway plan, and
     SEARCH_BUDGET_SECONDS keeps the request inside the client's poll window.
@@ -318,6 +331,19 @@ async def _search_plan(
             )
         )
         lane_labels.append("linkedin")
+
+    if local_queries and local_domains:
+        # Queries written in the country's own language, run against that
+        # country's own press. An English query on Japanese domains returns the
+        # English edition of one title; a Japanese query on the same domains
+        # returned nine usable bodies including the national wire.
+        lanes.append(
+            _run_round(
+                local_queries, list(local_domains), start_date, end_date,
+                company_name, [], set(seen_urls), aliases,
+            )
+        )
+        lane_labels.append("local")
 
     lane_results = await asyncio.gather(*lanes)
 
@@ -1001,6 +1027,12 @@ async def ingest_company_data(
         # site, which the publisher registry does not contain by design.
         open_queries = legal_queries(company_label, identity) + hiring_queries(company_label)
         linkedin_queries = linkedin_hiring_queries(company_label)
+
+        # Queries in the country's own language, scoped to that country's own
+        # press. Generated only when the press list names a language other than
+        # English: an untranslated query is better than a bad translation.
+        local_queries = await generate_local_queries(company_label, trust_policy)
+        local_domains = list(trust_policy.national) if local_queries else []
         # The registry name is the company's other name, and headlines use it:
         # a search for "IBM" otherwise discards "International Business Machines".
         fetched = await _search_plan(
@@ -1012,6 +1044,8 @@ async def ingest_company_data(
             open_queries=open_queries,
             aliases=aliases,
             linkedin_queries=linkedin_queries,
+            local_queries=local_queries,
+            local_domains=local_domains,
         )
     else:
         # Everything up to today is already covered, so reuse what is stored

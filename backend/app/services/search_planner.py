@@ -87,6 +87,12 @@ class SearchPlan(BaseModel):
     fallback_queries: List[str] = Field(default_factory=list)
     fundamentals: bool = False
     rationale: str = ""
+    # Queries written in the language the company's own country publishes in.
+    # They run against the national domains only, because that is where they
+    # return reporting rather than the English edition of one title.
+    local_queries: List[str] = Field(default_factory=list)
+    # The language code those queries are written in.
+    local_language: str = ""
 
 
 PLANNER_PROMPT = """You plan web research for a pre-meeting intelligence brief.

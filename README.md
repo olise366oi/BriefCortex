@@ -152,7 +152,20 @@ of the company's registered country is learned once and stored
   brief in that country, so the failure mode is "store nothing", never "store
   something wrong".
 - The list is held on disk under `backend/data/` and reused, so generation costs
-  one model call per country rather than one per request.
+  one model call per country rather than one per request. A stored entry that lacks
+  a newer field is upgraded in place: the validated domains are kept and only the
+  missing part is asked for again.
+
+**The query is written in the country's language.** An English query restricted to
+Japanese domains returns the English edition of one title; a query in Japanese
+against the same domains returned nine usable bodies including the national wire
+(measured). So the country's press list also carries the language its business
+press publishes in and a set of topic terms in that language, and a fourth
+retrieval lane runs those queries against the national domains only. Keeping the
+domain scope tight is what makes them worth running: in the local language an
+open search returns local blogs and message boards, while the same query against
+established press returns reporting. Measured effect on a Japanese company: 24 →
+41 hard facts.
 
 **Some hosts are never press, anywhere.** Forums, social platforms, job boards,
 profile directories and price-aggregator pages are refused before anything else
@@ -417,7 +430,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 379 passed.
+Expected: 386 passed.
 
 > Test count is maintained locally while the frontend suite is still being
 > written; the shared baseline will be the sum of this backend count and whatever
