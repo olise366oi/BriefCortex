@@ -32,6 +32,14 @@ class BriefingRequest(BaseModel):
     own_profile_name: str = ""
     # A one-off profile, for a caller who does not want to save one first.
     own_profile_inline: str = ""
+    # The caller's own company, when its market position should shape the advice.
+    # Scanned for quote and market coverage only: our own hiring says nothing
+    # about the counterparty, so it is deliberately not searched.
+    own_company_name: str = ""
+    own_company_ticker: str = ""
+    # "retrieval" reads the market; "internal" means the caller will supply
+    # material through the internal-document endpoint instead.
+    own_company_source: str = "retrieval"
 
 
 class BriefingAcceptedResponse(BaseModel):
@@ -67,6 +75,30 @@ class EntityCandidateOut(BaseModel):
 
 class EntityCandidateList(BaseModel):
     candidates: List[EntityCandidateOut] = Field(default_factory=list)
+
+
+class InternalMaterialRequest(BaseModel):
+    """Internal material about the caller's own company.
+
+    An alternative to having us read the market: a company that would rather not
+    be assessed from public coverage supplies its own note.
+    """
+
+    company: str
+    title: str = ""
+    body: str
+
+
+class InternalMaterialView(BaseModel):
+    company: str
+    title: str
+    chars: int
+    supplied_at: datetime
+
+
+class InternalMaterialList(BaseModel):
+    company: str
+    items: List[InternalMaterialView] = Field(default_factory=list)
 
 
 class BriefingJobStatus(str, Enum):

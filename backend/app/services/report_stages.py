@@ -82,8 +82,9 @@ Reply with JSON only:
 ANALYSIS_PROMPT = """You assess a company from what has already been established.
 
 You receive the findings that survived verification, the job postings, and the
-market quote if the company is listed. You do NOT receive raw articles, and you
-must not introduce a fact that is not in the findings you were given.
+market quote if the company is listed. You may also receive a block describing
+OUR OWN COMPANY's current market position. You do NOT receive raw articles, and
+you must not introduce a fact that is not in the blocks you were given.
 
 Produce an analysis:
 - "assessment": what the findings add up to. The direction of the business, what
@@ -92,9 +93,19 @@ Produce an analysis:
 - "risks": each a specific exposure with the finding behind it. Name the evidence
   in the sentence. Do not list a risk the findings do not support.
 
+OUR OWN COMPANY, when supplied, is context for this deal, not a subject of the
+brief:
+- Use it to say how OUR position bears on this counterparty: a weak share price
+  or negative market coverage on our side reduces our room to walk away, extend
+  terms or hold out for volume; a strong one gives us room.
+- It is our market position, not the counterparty's opinion of us. Do not write
+  "they think we are..." — nobody in the evidence said that. Write what our
+  position means for the negotiation.
+- Never restate our company's facts as if they were the counterparty's facts.
+
 Rules:
-- Every statement must trace to a finding, posting or the quote. Mark anything
-  else "[UNVERIFIED]".
+- Every statement must trace to a finding, posting, quote or our-company block.
+  Mark anything else "[UNVERIFIED]".
 - "No reporting found" is not "no problems found". When coverage is thin, say the
   coverage was insufficient and name what could not be checked.
 - Never describe an unchecked area as clean.
@@ -211,8 +222,14 @@ def render_analysis_input(
     company: str,
     coverage_level: str,
     lanes_missing: Sequence[str],
+    own_company_block: str = "",
 ) -> str:
-    """The verified findings the analysis stage is allowed to read."""
+    """The verified findings the analysis stage is allowed to read.
+
+    ``own_company_block`` describes the caller's own market position. It reaches
+    this stage because "how much room do we have" is part of what the evidence
+    amounts to, while the caller's internal documents stay out of it entirely.
+    """
     lines: List[str] = []
     if company:
         lines.append(f"COMPANY BEING BRIEFED: {company}")
@@ -242,6 +259,12 @@ def render_analysis_input(
         lines.append("<MARKET>")
         lines.append(quote)
         lines.append("</MARKET>")
+
+    if own_company_block.strip():
+        lines.append("")
+        lines.append("<OUR_COMPANY_MARKET_POSITION>")
+        lines.append(own_company_block.strip())
+        lines.append("</OUR_COMPANY_MARKET_POSITION>")
 
     lines.append("")
     lines.append("<COVERAGE>")

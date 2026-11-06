@@ -33,6 +33,7 @@ from app.services.cache import DEFAULT_TTL_HOURS as CACHE_TTL_HOURS
 from app.services.cache_invalidation import InvalidationVerdict, check_reuse
 from app.services.evidence_fingerprint import evidence_fingerprint
 from app.services.own_profile import ProfileStore, resolve_profile
+from app.services.own_company_scan import scan_own_company
 from app.services.ingestion import _build_company_id, ingest_company_data
 from app.services.logger_service import get_logger
 from app.services.window import compute_evidence_window
@@ -208,6 +209,42 @@ async def _generate_live_report(
     )
     profile_text = profile.to_prompt_block() if profile is not None else ""
 
+    # Our own market position, read only when the caller asked for retrieval. It
+    # is prompt context, not part of the brief's own evidence, so it does not
+    # enter the fingerprint: two briefs on the same counterparty evidence are the
+    # same brief even if our own share price moved overnight.
+    own_block = ""
+    own_company_name = getattr(record, "own_company_name", "") or ""
+    own_company_ticker = getattr(record, "own_company_ticker", "") or ""
+    own_source = getattr(record, "own_company_source", "") or "retrieval"
+    if own_company_name and own_source == "retrieval":
+        snapshot = await scan_own_company(own_company_name, own_company_ticker)
+        own_block = snapshot.to_prompt_block()
+        logger.info(
+            "Own company context | company=%r | quote=%s | headlines=%s | usable=%s",
+            own_company_name,
+            snapshot.quote is not None,
+            len(snapshot.headlines),
+            bool(own_block),
+        )
+    elif own_company_name and own_source == "internal":
+        # The caller supplies its own material instead of having the market read.
+        # It joins the profile, because both describe our side of the deal.
+        from app.services.internal_material import render_materials, shared_store
+
+        materials = shared_store().list(own_company_name)
+        rendered_materials = render_materials(materials)
+        if rendered_materials:
+            profile_text = "\n\n".join(
+                part for part in (profile_text, rendered_materials) if part
+            )
+        logger.info(
+            "Own company internal material | company=%r | items=%s | chars=%s",
+            own_company_name,
+            len(materials),
+            len(rendered_materials),
+        )
+
     fingerprint = evidence_fingerprint(
         fact_base, record.meeting_purpose, description, own_profile=profile_text
     )
@@ -247,6 +284,7 @@ async def _generate_live_report(
         company=record.company_name,
         description=description,
         own_profile=profile_text,
+        own_company_block=own_block,
     )
     briefing_repo.update(record.id, evidence_fingerprint=fingerprint)
     return report, _build_evidence_summary(fact_base)
@@ -462,6 +500,9 @@ async def create_briefing(db: Session, request: BriefingRequest) -> uuid.UUID:
         company_description=request.company_description,
         own_profile_name=request.own_profile_name,
         own_profile_inline=request.own_profile_inline,
+        own_company_name=request.own_company_name,
+        own_company_ticker=request.own_company_ticker,
+        own_company_source=request.own_company_source,
     )
 
     _spawn_job(record.id, settings)

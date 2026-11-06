@@ -52,6 +52,9 @@ class BriefingRepository:
         company_description: Optional[str] = None,
         own_profile_name: Optional[str] = None,
         own_profile_inline: Optional[str] = None,
+        own_company_name: Optional[str] = None,
+        own_company_ticker: Optional[str] = None,
+        own_company_source: Optional[str] = None,
     ) -> BriefingRecord:
         record = BriefingRecord(
             company_name=company_name,
@@ -62,6 +65,9 @@ class BriefingRepository:
             company_description=company_description or None,
             own_profile_name=own_profile_name or None,
             own_profile_inline=own_profile_inline or None,
+            own_company_name=own_company_name or None,
+            own_company_ticker=own_company_ticker or None,
+            own_company_source=own_company_source or None,
         )
         self.db.add(record)
         self.db.commit()

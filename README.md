@@ -21,15 +21,20 @@ Most tools therefore optimize for volume and fluency, not for whether a specific
 
 Given `{company, meeting_purpose}`, BriefCortex produces a structured `BriefingReport`:
 
-- **Plan-then-search retrieval**: the model decides which queries to run and which publisher categories to hit, constrained to a source registry.
-- **Company identity before retrieval**: the legal-entity registry supplies jurisdiction and legal form, which decides which regulator the legal searches name.
+- **Both sides are read**: the counterparty through the full pipeline, the caller's own company through its market position (quote plus the coverage that moved it).
+- **Three-stage generation with the audit in between**: findings, then audit, then analysis, then recommendation. A claim the audit removed cannot reach the reasoning behind the advice.
 - **Per-publisher scoping**: 13 domains each get their own path and body-boundary rules, so navigation trees, related-article blocks and paywalls never become facts.
-- **30-day freshness**: both the publication date and the reporting period inside each sentence are checked.
-- **Hard facts first**: facts are what the model may turn into leverage; unverified commentary and job postings sit in their own blocks with their own rules.
-- **Executive summary with numeric negotiation asks**, derived only from hard facts — or a directional business read when no objective was supplied.
+- **30-day counterparty freshness, 60-day own-company baseline**: both the publication date and the reporting period inside each sentence are checked.
+- **Hard facts first**: facts are what the model may turn into leverage; unverified commentary, job postings and forward-looking statements sit in their own lanes with their own rules.
+- **A dated timeline**: every claim carries its date, reports of one event over weeks consolidate into one claim with a stated span, and key events lead.
+- **Long documents are read selectively**: a 10-K is segmented, scored against the objective and kept to the sections that answer it.
+- **Recommendation with numeric asks**, derived from the assessment — or a directional read when no objective was supplied.
 - **A deterministic conflict-detection lane** that flags contradictory facts with both sources attached — and is *never* fed into the LLM.
-- **An exact-request cache** so the same request inside its window returns the stored brief without re-running retrieval or inference.
+- **Three cache layers** keyed on request, on evidence, and on cross-set contradiction, so a brief is reused when the facts match and invalidated when newer facts overturn it.
 - **A coverage ledger** that reports what retrieval actually reached — and, when it reached almost nothing, says so instead of letting an empty result read as a clean one.
+
+For the build-level detail of each of these — stage contracts, audit rules, measured
+thresholds, per-platform link shapes — see **[ENGINEERING.md](ENGINEERING.md)**.
 
 ---
 
@@ -92,20 +97,34 @@ graph TD
 
 ### 1. Freshness: A 30-Day Window, Checked Twice
 
-Two clocks matter, and checking only one is not enough. Both are enforced over a 30-day search window.
-
-- **Publication date.** Tavily timestamps are RFC 2822 (`Wed, 21 Oct 2026 00:00:00 GMT`), which `datetime.fromisoformat` rejects outright, so the date is parsed with `email.utils.parsedate_to_datetime`. When a result still arrives without a date, a two-tier fallback runs: the date is read out of the URL slug first (offline, and it survives the anti-bot walls that answer Reuters with 401 and Bloomberg with 403), then from a page fetch via `htmldate`.
-- **Reporting period.** An article published inside the window can still report an older period ("in the first five months of 2026", "third quarter of 2025"). Those sentences are dropped. Comparisons are kept, because "lowest since April 2025" describes where things stand *now*.
+Two clocks are enforced over a 30-day window: the article's **publication date**
+(parsed from Tavily's RFC 2822 format, with a URL-slug and page-fetch fallback),
+and its **reporting period** (an article published today can still describe Q3
+2025 — those sentences are dropped, while comparisons like "lowest since April
+2025" are kept because they describe where things stand now).
 
 A 2023 layoff cannot be used as a 2026 negotiation lever.
 
 ### 2. Retrieval: Plan, Scope, Then Read
 
-Retrieval is not a single query against a flat domain list.
+Retrieval is not one query against a flat domain list. Three lanes — registry
+news, open web, LinkedIn postings — run **concurrently**, then merge.
 
-**Planning.** `search_planner.py` asks the model for a search plan — which queries to run and which publisher categories to use. The model may only choose *categories* from a fixed source registry (`financial_wire`, `financial_business`, `asia_market`, `auto_industry`, `official_primary`); any category outside it is discarded, and domains are resolved from the registry, so a fabricated host can never reach the search API. When the model is unavailable the planner falls back to a deliberately industry-agnostic financial plan, so a bank and an automaker both get valid coverage.
+**Both sides are read.** The counterparty (B) gets the full pipeline. The caller's
+own company (A) is scanned for **market position only** — its quote and the
+coverage that moved it, over 60 days rather than the 30 a counterparty gets, because
+one month is too short to characterise the trend every deal is argued against.
+Our own hiring is deliberately not searched: it says nothing about them. A caller
+who would rather not be read from public coverage supplies internal material
+instead (`POST /api/briefings/own-company/material`), which reaches the
+recommendation and never becomes evidence about the counterparty.
 
-**The trusted publisher lists.** Every domain this product will search inside a category is published here, because "trusted" has to be checkable rather than claimed:
+Nothing is filtered by sentiment on either side — positive and negative coverage
+are both kept, because a company that only remembers its good news cannot be
+assessed.
+
+**The trusted publisher lists.** Every domain searched inside a category is
+published here, because "trusted" has to be checkable rather than claimed:
 
 | Category | Domains |
 |---|---|
@@ -115,71 +134,93 @@ Retrieval is not a single query against a flat domain list.
 | `auto_industry` | `autonews.gasgoo.com`, `cnevpost.com`, `insideevs.com`, `electrek.co` |
 | `official_primary` | `sec.gov`, `prnewswire.com`, `globenewswire.com`, `businesswire.com` |
 
-**When the list is not enough.** A regulator's case page, a company careers site and a founder's own blog are not publishers, and a brief that ignored them would miss the primary record. So a second round runs *outside* the registry (`open_queries`: jurisdiction-aware legal searches, hiring, and LinkedIn job listings). It is deliberately small — a handful of targeted queries, not a broad crawl — because the trade is explicit: outside the list, editorial standards are unknown and an unverified claim is more likely. Results from that round still pass the same subject routing, code-of-conduct filters and pre-delivery audit, and are marked by source in the report rather than trusted more because they were found.
+The model chooses *categories*, never domains, so a fabricated host cannot reach
+the search API.
 
-**Scoping.** Two rule tables are keyed by publisher and verified against live pages:
+**When the list is not enough.** A regulator's case page, a careers site and a job
+board are not publishers. A deliberately small second round runs outside the
+registry — jurisdiction-aware legal searches, hiring, LinkedIn — because the trade
+is explicit: outside the list, editorial standards are unknown and an unverified
+claim is likelier. Those results pass the same routing and the same pre-delivery
+audit, and are marked by source rather than trusted more for having been found.
 
-- `SITE_SECTION_RULES` — keep/drop path prefixes, so opinion columns, live blogs, stock-quote tables and video pages are never read. Longest-domain matching keeps `markets.businessinsider.com` on its own rules, and year-indexed paths follow the calendar instead of a hard-coded year.
-- `SITE_BODY_RULES` — per-publisher body open and close markers plus chrome-line filters. Bloomberg opens with a ~190-line corporate mega-menu, CNBC arrives as a single newline-free blob, FT returns a paywall, gasgoo trails a "Related Articles" block that names other companies. Each needs its own boundary; one shared rule set cannot cover them.
+**Reading.** Hard facts are the opening three paragraphs plus the closing one;
+middle paragraphs contribute their first sentence only when it carries a negative
+signal. A body larger than 12k characters — a 10-K, an IR page — goes through the
+long-document reader, which keeps the sections that answer the meeting objective
+and drops boilerplate. Measured on a filing: 37,863 characters reduced to 836,
+retaining results-of-operations and liquidity, dropping forward-looking statements
+and exhibit indexes.
 
-**Reading.** Hard facts are the opening three paragraphs plus the closing paragraph. Middle paragraphs contribute only their first sentence, and only when it carries a negative signal — so the fact base gets the leverage without absorbing the commentator's framing. Signals are matched on word boundaries plus inflections, so `miss` cannot fire inside `mission`.
-
-`include_raw_content=True` is what supplies the body, and it returns page markdown. The `"text"` variant is measurably worse: plain text has no headings and no paragraph breaks, so Trafilatura rejected every listed-publisher article outright (measured: 5 of 5 dropped, 0 chars). The markdown mode keeps 8 of 10 on the same query. Plain text is still handled when a publisher sends it, by rebuilding paragraphs from the prose lines instead of discarding the article.
-
-**Depth.** Coverage stops on two budgets. A round must contribute previously unseen URLs that carry an article body, otherwise the loop exits (`MIN_USABLE_PER_ROUND`); the loop also stops at `SEARCH_BUDGET_SECONDS` so a request returns inside the client's poll window, with `MAX_SEARCH_ROUNDS=8` guarding a runaway plan. Tavily returns 10 results by default and accepts 20; above 20 the response is unreliable (measured: 25 → 16, 30 → 1), so extra coverage comes from more queries rather than a larger page size.
-
-**Body recovery.** A search result can point at a page whose body the crawler did not return. Rather than only dropping that publisher and re-running the queries, the empty URLs are fetched directly first: `Tavily extract` on the specific URL recovers the story behind an already-relevant result (measured: a shell recovered to 24,892 chars). The drop-and-re-run pass still follows, but only when coverage is still short after recovery.
-
-**Deduplication.** An identical sentence is stored once. A syndicated re-run that extends the stored sentence word for word replaces it, but only when the shared opening is long enough to be the same telling — two different facts that happen to open with the same clause both stay.
+→ Scoping tables, per-publisher body boundaries, depth budgets, body recovery and
+deduplication: **[ENGINEERING.md §3](ENGINEERING.md#3-retrieval)**.
 
 ### 3. Two Report Modes
 
-The report follows the meeting objective when one is supplied: numeric asks, leverage, trades.
-
-With no objective, the brief is a *fundamentals* brief — the company's business direction, what is demonstrably working, and what deserves caution. In that mode the model is forbidden from inventing a target or emitting numeric demands, and the anti-hallucination fallback sentence is scoped to negotiation mode only.
+The report follows the meeting objective when one is supplied: numeric asks,
+leverage, trades. With no objective it is a *fundamentals* brief — business
+direction, what is demonstrably working, what deserves caution — and the model is
+forbidden from inventing a target or emitting numeric demands.
 
 ### 4. Fact / Opinion Separation
-`FactBase` carries two distinct lists: `hard_facts` and `analyst_opinions`. They are rendered into the LLM prompt as separate, labeled blocks (`<HARD_FACTS>`, `<ANALYST_OPINIONS>`). The system prompt forbids using unverified commentary as negotiation leverage. If hard facts contain no negative signal, the model is required to output the exact fallback sentence:
+
+`FactBase` carries `hard_facts` and `analyst_opinions` as separate blocks, and the
+prompt forbids using unverified commentary as leverage. If hard facts contain no
+negative signal the model must output exactly:
 
 > "Evidence insufficient; recommend standard outreach."
 
 No fabrication, no manufactured aggression.
 
-### 5. Conflict Detection as an Independent, Auditable Lane
-`detect_fact_conflicts()` runs a deterministic regex rule engine over `hard_facts` only. It returns structured conflicts with both sides' `source_url`, and its output is **never fed into the LLM prompt**.
+### 5. Three Stages, With the Audit In Between
 
-LLM output and conflict detection are two independent tracks by design: semantics cannot override evidence, and evidence cannot be reinterpreted by semantics.
+This is the structural answer to "why is a wrong claim in my brief".
 
-### 6. Cache: Two Different Jobs
+| Stage | Reads | Writes |
+|---|---|---|
+| findings | evidence, postings | `news`, `hires` |
+| **audit** | findings + evidence | removes failing claims |
+| analysis | **audited** findings, quote, our own market position | `analysis` |
+| recommendation | **analysis only** + the caller's own profile | `executive_summary` |
 
-There are two caches, and they answer different questions.
+A claim the audit removed can never reach the reasoning that produces the advice,
+and the advice reasons over an assessment rather than a parallel reading. The
+caller's own **profile** reaches only the recommendation; our own **market
+position** reaches the analysis, because "how much room do we have" is part of
+what the evidence amounts to.
 
-**Exact-request cache** (`services/cache.py`). A finished brief is keyed on
-company + objective + meeting date. An identical request inside the TTL returns
-the stored brief instead of paying for retrieval and inference again. Meeting
-time is keyed to the day, because the evidence window is anchored to the date —
-two meetings on one day produce the same brief.
+What the analysis does with our own position is state how it bears on *this*
+counterparty — a weak share price reduces our room to walk away or hold out. It is
+never written as "they think we are weak": nobody in the evidence said that.
 
-**Evidence-keyed reuse** (`services/evidence_fingerprint.py`). The request cache
-above misses whenever a meeting moves by a day, even if nothing about the company
-changed, which is why the hit rate was low. A brief is actually derived from its
-evidence, so the evidence gets its own fingerprint — over the facts, the postings,
-the objective and the company description, and deliberately not over the date. A
-later run whose facts match reuses the stored brief and skips inference entirely.
+Every claim carries a date. Reports of one event over several weeks become one
+claim with a stated span (`first_seen .. date`), and news is ordered key events
+first, then newest.
 
-**Cache invalidation** (`services/cache_invalidation.py`). Reuse is only safe
-while the evidence still says the same thing, and the fingerprint cannot see a
-contradiction because each fact in it was correct when written. So before a stored
-brief is served, the old and new fact sets are checked against each other with
-the same deterministic conflict engine used everywhere else. A brief written while
-the company was hiring is wrong the moment a layoff is reported: the contradiction
-invalidates the reuse and the brief is regenerated. The check is regex-based and
-cross-item only, so it costs microseconds and needs no model.
+→ Full contract, prompts and audit rules: **[ENGINEERING.md §5](ENGINEERING.md#5-staged-generation)**.
 
-**Content-aware TTL headers** (`services/bifrost_headers.py`). When a request
-does reach a model, the evidence decides how long the response may be cached.
-Fact texts are matched against three word-boundary rule sets, so `third quarter`
-is not read as a hiring signal and `shares` does not fire on `shareholders`.
+### 6. Conflict Detection Stays Off the LLM Path
+
+`detect_fact_conflicts()` is a deterministic regex engine over `hard_facts` only.
+Its output is **never** fed into the prompt: semantics cannot override evidence,
+and evidence cannot be reinterpreted by semantics.
+
+### 7. Cache: Three Different Questions
+
+| Layer | Key | Question |
+|---|---|---|
+| exact request | company + objective + **meeting day** | same request? |
+| evidence fingerprint | facts + postings + objective + description + own profile | same brief? |
+| invalidation | cross-set contradiction | may it still be served? |
+
+The middle layer exists because the request layer missed whenever a meeting moved
+by a day, even though nothing about the company changed. The third exists because
+a fingerprint cannot see a contradiction: a brief written while the company was
+hiring is wrong the moment a layoff is reported, and each individual fact in it
+was still correct.
+
+Content-aware TTL travels as headers (`x-bf-cache-key`, `x-bf-cache-ttl`,
+`x-bf-content-class`), classified by word-boundary matching on the fact texts:
 
 | Class | Signals | TTL |
 |---|---|---|
@@ -187,10 +228,7 @@ is not read as a hiring signal and `shares` does not fire on `shareholders`.
 | `structural` | hiring, appointments, product launches | 72h |
 | `primary` | annual reports, filings, press releases | 168h |
 
-Classes apply by precedence: a fact set is only as cacheable as its most
-perishable member. The headers (`x-bf-cache-key`, `x-bf-cache-ttl`,
-`x-bf-content-class`) ride on the outgoing request, so the gateway needs no
-source changes.
+→ Fingerprint inputs, invalidation engine, gateway decision: **[ENGINEERING.md §8](ENGINEERING.md#8-caching)**.
 
 ### 7. Tested, Not Vibes
 
@@ -350,7 +388,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 326 passed.
+Expected: 341 passed.
 
 > Test count is maintained locally while the frontend suite is still being
 > written; the shared baseline will be the sum of this backend count and whatever

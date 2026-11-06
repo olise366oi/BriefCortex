@@ -35,6 +35,11 @@ class BriefingRecord(Base):
     # Which own-company profile the recommendation was written for.
     own_profile_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     own_profile_inline: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The caller's own company, scanned for market position only.
+    own_company_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    own_company_ticker: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # "retrieval" reads the market; "internal" means the caller supplies material.
+    own_company_source: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     report: Mapped[Optional[Dict[str, Any]]] = mapped_column(JsonColumn, nullable=True)
     # Provenance stored beside the report: the conflicts the engine found and

@@ -16,6 +16,13 @@ from datetime import date, datetime, timedelta, timezone
 
 WINDOW_DAYS = 30
 
+# The caller's own company is kept longer than a counterparty's evidence: its
+# market position is the context every deal is argued against, so a 60-day history
+# is more useful than a 30-day one. Nothing is filtered by sentiment — positive and
+# negative coverage are both kept, because a company that only remembers its good
+# news cannot be assessed.
+OWN_COMPANY_RETENTION_DAYS = 60
+
 # URL identity decay, as idle time since the URL was last encountered.
 DORMANT_AFTER_DAYS = 60
 PURGE_AFTER_DAYS = 90

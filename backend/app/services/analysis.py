@@ -537,6 +537,7 @@ async def generate_briefing_report(
     company: str = "",
     description: str = "",
     own_profile: Optional[str] = None,
+    own_company_block: str = "",
 ) -> BriefingReport:
     """Generate a validated BriefingReport, in three stages.
 
@@ -555,7 +556,8 @@ async def generate_briefing_report(
     """
     logger.info(
         "Analysis started | company_id=%s | purpose=%r | mode=%s | hard_facts=%s | "
-        "analyst_opinions=%s | conflicts=%s | revision=%s | own_profile=%s",
+        "analyst_opinions=%s | conflicts=%s | revision=%s | own_profile=%s | "
+        "own_market=%s",
         fact_base.company_id,
         meeting_purpose,
         "negotiation" if meeting_purpose.strip() else "fundamentals",
@@ -564,6 +566,7 @@ async def generate_briefing_report(
         len(fact_base.conflicts),
         previous is not None,
         bool(own_profile and own_profile.strip()),
+        bool(own_company_block and own_company_block.strip()),
     )
     client, model = build_client()
 
@@ -616,6 +619,7 @@ async def generate_briefing_report(
         company,
         fact_base.coverage.level,
         fact_base.coverage.lanes_missing,
+        own_company_block,
     )
     analysis_out = await _call_stage_with_retry(
         client, model, ANALYSIS_PROMPT, analysis_input, AnalysisStage, max_retries,
