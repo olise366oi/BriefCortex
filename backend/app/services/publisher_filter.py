@@ -16,7 +16,11 @@ from app.services.source_rules import (
     SITE_SECTION_RULES,
 )
 from app.services.long_document import is_long_document, select_relevant
+from app.services.logger_service import get_logger
+from app.services.media_trust import is_refused_host
 from app.services.urls import host_of, url_path
+
+logger = get_logger("publisher_filter")
 
 MIN_BODY_CHARS = 400
 
@@ -133,14 +137,24 @@ def filter_results_for_company(
     company_name: str,
     aliases: Optional[List[str]] = None,
 ) -> List[dict]:
-    """Keep only results that pass section scoping and mention the company."""
+    """Keep only results that pass section scoping and mention the company.
+
+    A refused host is dropped here, before any of the reading work happens: a
+    forum thread, a social post or an aggregator of user submissions is not press,
+    so it never reaches the fact base regardless of what it says or who links it.
+    """
     kept: List[dict] = []
+    refused: List[str] = []
     for result in results:
         if not isinstance(result, dict):
             continue
 
         url = result.get("url")
         if not isinstance(url, str) or not url.strip():
+            continue
+
+        if is_refused_host(url):
+            refused.append(host_of(url))
             continue
 
         if not is_kept_result(url):
@@ -150,6 +164,13 @@ def filter_results_for_company(
             continue
 
         kept.append(result)
+
+    if refused:
+        logger.info(
+            "Non-press hosts refused | count=%s | hosts=%s",
+            len(refused),
+            sorted(set(refused))[:8],
+        )
 
     return kept
 

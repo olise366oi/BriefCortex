@@ -32,6 +32,7 @@ from app.services.article_subject import classify_article_subjects
 from app.services.company_identity import (
     disambiguate_with_model,
     jurisdiction_from_description,
+    jurisdiction_from_url,
     needs_caller_choice,
     rank_candidates,
     resolve_identity,
@@ -53,6 +54,7 @@ from app.services.keywords import match_word
 from app.services.urls import host_of
 from app.services.incidental_harvest import harvest_incidental_facts
 from app.services.legal_signals import legal_queries
+from app.services.media_trust import infer_jurisdiction, order_by_trust, resolve_policy
 from app.services.logger_service import get_logger
 from app.services.publisher_filter import extract_clean_text, host_of
 from app.services.search_planner import SearchPlan, plan_searches
@@ -770,6 +772,20 @@ def _drop_out_of_window(
     return kept
 
 
+def _likely_company_domain(company: str) -> str:
+    """Return the most likely official domain of a company, or an empty string.
+
+    Built from the company's own name, not from search results: a result set
+    about a Japanese firm is full of American law-firm pages, and taking any host
+    from it would read as "this company is American". Only the name's own
+    lowercase token is tried, which is how corporate domains are usually formed.
+    """
+    token = re.sub(r"[^a-z0-9]+", "", (company or "").lower())
+    if len(token) < 3:
+        return ""
+    return f"{token}.com"
+
+
 def _company_tokens(company: str) -> List[str]:
     """Return the searchable name tokens of a company, used to attribute a page."""
     import re as _re
@@ -937,8 +953,44 @@ async def ingest_company_data(
     # name to read headlines, whether or not retrieval ran this time.
     aliases = [identity.name] if identity is not None else None
 
+    # A company's registered country decides its press list, so when the registry
+    # could not name a legal entity the country is taken from the company's own
+    # domain instead. A private firm has no LEI but it does publish where it is
+    # based, and reading a Japanese company through an English-language wire list
+    # is what turned its coverage into a decade of American litigation filings.
+    press_jurisdiction = identity.jurisdiction if identity is not None else None
+    if not press_jurisdiction:
+        press_jurisdiction = jurisdiction_from_url(_likely_company_domain(company_label))
+        if press_jurisdiction:
+            logger.info(
+                "Jurisdiction from company domain | company=%r | country=%s",
+                company_label,
+                press_jurisdiction,
+            )
+    if not press_jurisdiction:
+        # The registry has no entity and the domain carries no country. Ask which
+        # country the company sits in, because reading a Japanese firm through an
+        # English-language wire list is what turned its coverage into a decade of
+        # American litigation filings.
+        press_jurisdiction = await infer_jurisdiction(company_label)
+
+    # One press list per company, resolved once and reused by the planner and by
+    # the reading order. Generation costs a model call per country, so a stored
+    # list is preferred and a company with no known country gets no national tier
+    # rather than a guessed one.
+    trust_policy = await resolve_policy(press_jurisdiction)
+    logger.info("Media trust | %s", trust_policy.description)
+
     if window.needs_fetch:
-        plan = await plan_searches(company_label, request.meeting_purpose.strip())
+        # The company's registered country decides which national press is
+        # searched: a company is covered where it lives, and the international
+        # wire list alone returns foreign filings about a mid-sized firm instead
+        # of its own business press.
+        plan = await plan_searches(
+            company_label,
+            request.meeting_purpose.strip(),
+            trust_policy,
+        )
         logger.info(
             "Search plan | industry=%s | categories=%s | fundamentals=%s",
             plan.industry, plan.categories, plan.fundamentals,
@@ -970,6 +1022,10 @@ async def ingest_company_data(
     fetched = await resolve_publish_dates(fetched)
     fetched = _drop_out_of_window(fetched, window.window_start, window.available_end)
     fetched = order_by_publisher(fetched)
+    # Trust ordering, applied last so it is what the reading budget actually
+    # follows: national press of the company's own country is read before foreign
+    # wires, because that is where a mid-sized non-US firm is covered.
+    fetched = order_by_trust(fetched, trust_policy)
 
     hard_facts, analyst_opinions, hiring_items, other_articles, prepared, stats = (
         await _route_and_collect(

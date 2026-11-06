@@ -1,0 +1,555 @@
+# /backend/app/services/media_trust.py
+"""Which publishers count as press for a given country, learned once and stored.
+
+A company's coverage lives where the company lives. YKK is Japanese, and the
+international wire list returns a decade of US litigation filings about it while
+missing Nikkei entirely.
+
+Hardcoding a list per country does not scale: there are ~200 jurisdictions, the
+titles change, and nobody on this project can vouch for the business desk of a
+newspaper in a market they have never read. So the list is **generated**: the
+model is asked which outlets are the established press for a country's business
+community, the answer is validated, and it is stored on disk. The next brief on a
+company in that country reads the stored list instead of paying for it again.
+
+Two fixed rules survive generation, because they are not matters of local
+knowledge:
+
+1. **Some hosts are never press, anywhere.** Forums, social platforms,
+   user-submitted aggregators and content farms are refused before anything else
+   runs. Rumour is a claim about a claim, not a source.
+2. **A generated list is validated, not trusted.** An answer naming a social
+   platform, a job board or a host that is not plausible as a news domain is
+   discarded rather than stored. A wrong list silently narrows every future brief
+   in that country, so the failure mode has to be "store nothing", never "store
+   something wrong".
+"""
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+from app.services.logger_service import get_logger
+
+logger = get_logger("media_trust")
+
+# Where learned per-country lists are kept. Machine-local, not source: the list
+# is generated per deployment and is not part of the product's identity.
+STORE_PATH = Path(__file__).resolve().parents[2] / "data" / "media_trust.json"
+
+# =============================================================================
+# 1. Never press, anywhere
+# =============================================================================
+
+# Matched as host suffixes, so "reddit.com" refuses "old.reddit.com".
+REFUSED_HOSTS: Tuple[str, ...] = (
+    # forums and message boards
+    "reddit.com", "quora.com", "stocktwits.com", "investorshub.advfn.com",
+    "advfn.com", "boards.fool.com",
+    # social platforms
+    "facebook.com", "fb.com", "x.com", "twitter.com", "instagram.com",
+    "tiktok.com", "youtube.com", "youtu.be", "linkedin.com", "pinterest.com",
+    "telegram.me", "t.me", "discord.com", "threads.net", "mastodon.social",
+    # user-generated and scraped aggregators
+    "wikipedia.org", "wikidata.org", "fandom.com", "medium.com", "substack.com",
+    "blogspot.com", "wordpress.com", "tumblr.com", "sites.google.com",
+    "docs.google.com", "slideshare.net", "scribd.com", "issuu.com",
+    "crunchbase.com", "glassdoor.com", "indeed.com", "ziprecruiter.com",
+    "builtin.com", "zippia.com", "simplyhired.com", "careerbuilder.com",
+    "monster.com", "rocketreach.co", "zoominfo.com", "apollo.io",
+    "signalhire.com", "leadiq.com", "pitchbook.com", "tracxn.com",
+    "similarweb.com", "semrush.com",
+    # content farms and SEO aggregators
+    "newsbreak.com", "flipboard.com", "newsnow.co.uk", "inkl.com", "msn.com",
+    "barchart.com", "wallstreetzen.com", "simplywall.st", "marketbeat.com",
+    "gurufocus.com", "moomoo.com", "zacks.com", "marketscreener.com",
+    "valuengine.com", "stockanalysis.com", "tipranks.com", "benzinga.com",
+    "insidermonkey.com", "24wallst.com", "nai500.com", "biggo.com",
+    "whatsmode.com",
+)
+
+# Filings, newswires and regulators: the company's own words. Trusted everywhere
+# because they are not journalism, so a jurisdiction cannot change their tier.
+PRIMARY_HOSTS: Tuple[str, ...] = (
+    "sec.gov", "prnewswire.com", "globenewswire.com", "businesswire.com",
+)
+
+# International wires and business press. They report a large company well
+# anywhere; they barely report a mid-sized one outside its own country.
+GLOBAL_HOSTS: Tuple[str, ...] = (
+    "reuters.com", "bloomberg.com", "wsj.com", "ft.com", "cnbc.com",
+    "businessinsider.com", "markets.businessinsider.com", "economist.com",
+    "apnews.com", "afp.com", "forbes.com",
+)
+
+# Ordered trust tiers. Lower index = read first.
+TIER_PRIMARY = "primary"
+TIER_NATIONAL = "national"
+TIER_GLOBAL = "global"
+TIER_FALLBACK = "fallback"
+TIER_ORDER: Tuple[str, ...] = (TIER_PRIMARY, TIER_NATIONAL, TIER_GLOBAL, TIER_FALLBACK)
+
+# =============================================================================
+# Host helpers
+# =============================================================================
+
+def host_of_result(result: dict) -> str:
+    """Return the bare host of a search result, lowercased."""
+    return normalize_host(str(result.get("url") or ""))
+
+
+def normalize_host(url_or_host: str) -> str:
+    """Reduce a URL or host to a bare lowercase host."""
+    text = (url_or_host or "").strip().lower()
+    if "//" in text:
+        text = text.split("//", 1)[1]
+    host = text.split("/")[0].split("?")[0].split("#")[0]
+    if "@" in host:
+        host = host.rsplit("@", 1)[-1]
+    host = host.split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def _matches(host: str, known: str) -> bool:
+    known = known.lower()
+    return host == known or host.endswith("." + known)
+
+
+def is_refused_host(url_or_host: str) -> bool:
+    """True when this host is never treated as press."""
+    host = normalize_host(url_or_host)
+    return any(_matches(host, refused) for refused in REFUSED_HOSTS)
+
+
+PUBLIC_SUFFIXES = (
+    ".com", ".net", ".org", ".co", ".jp", ".de", ".fr", ".uk", ".cn", ".in",
+    ".hk", ".sg", ".my", ".id", ".kr", ".tw", ".th", ".vn", ".au", ".nz",
+    ".ca", ".br", ".mx", ".ru", ".it", ".es", ".nl", ".se", ".dk", ".fi",
+    ".no", ".ch", ".at", ".be", ".ie", ".pt", ".pl", ".cz", ".gr", ".tr",
+)
+
+
+def looks_like_news_domain(host: str) -> bool:
+    """True when a host is plausible as a publication rather than a platform.
+
+    This is the validation that stops a generated list from storing nonsense: the
+    model may know a country's press, but it can also return a social handle, a
+    job board or a made-up string, and a wrong entry narrows every future brief
+    in that country.
+    """
+    if not host or len(host) < 4:
+        return False
+    if is_refused_host(host):
+        return False
+    if not any(host.endswith(suffix) for suffix in PUBLIC_SUFFIXES):
+        return False
+    # A publication has a name before its suffix.
+    local = host.rsplit(".", 1)[0]
+    if not local or len(local) < 2:
+        return False
+    # Reject obvious placeholders and personal pages.
+    if re.fullmatch(r"(www|blog|news\d+|user\d*)", local):
+        return False
+    if "/" in host or " " in host:
+        return False
+    # A local edition of an international wire is not that country's own press,
+    # and listing it as national spends a national slot on a title the reader
+    # already gets from the global tier.
+    for international in GLOBAL_HOSTS:
+        brand = international.rsplit(".", 1)[0]
+        if local == brand or local.startswith(brand + "."):
+            return False
+    return True
+
+
+# =============================================================================
+# Learned per-country lists
+# =============================================================================
+
+JURISDICTION_COUNTRY: Dict[str, str] = {
+    "JP": "Japan", "CN": "China", "HK": "Hong Kong", "SG": "Singapore",
+    "MY": "Malaysia", "VN": "Vietnam", "ID": "Indonesia", "KR": "South Korea",
+    "TW": "Taiwan", "TH": "Thailand", "IN": "India", "AU": "Australia",
+    "NZ": "New Zealand", "PH": "Philippines",
+    "DE": "Germany", "FR": "France", "NL": "the Netherlands", "BE": "Belgium",
+    "IT": "Italy", "ES": "Spain", "SE": "Sweden", "DK": "Denmark",
+    "FI": "Finland", "NO": "Norway", "CH": "Switzerland", "AT": "Austria",
+    "IE": "Ireland", "PT": "Portugal", "PL": "Poland", "CZ": "Czechia",
+    "GR": "Greece", "TR": "Turkey", "GB": "the United Kingdom",
+    "US": "the United States", "CA": "Canada", "MX": "Mexico",
+    "BR": "Brazil", "AR": "Argentina", "CL": "Chile",
+    "AE": "the United Arab Emirates", "SA": "Saudi Arabia",
+    "IL": "Israel", "ZA": "South Africa", "EG": "Egypt", "NG": "Nigeria",
+}
+
+
+MEDIA_LIST_PROMPT = """You name the established press of one country.
+
+You receive a country. Return the news outlets that a professional reader in that
+country's business community would consider serious reporting, in descending order
+of authority for business and corporate news.
+
+Rules:
+- Only real, currently-published news organisations. No social platforms, no
+  forums, no job boards, no company directories, no price-aggregator pages.
+- Prefer the outlets that actually report company news: business dailies and the
+  business desks of national newspapers first, then general national press.
+- Domains only, bare host, no scheme and no path: "nikkei.com", not
+  "https://www.nikkei.com/".
+- Between 8 and 20 entries. Quality over quantity: if you know ten, return ten.
+- If you do not know that country's press well, return FEWER entries. A short
+  accurate list beats a long guessed one.
+
+Reply with JSON only:
+{"country": str, "domains": [str], "confidence": "high|medium|low",
+ "note": "one short sentence"}"""
+
+
+@dataclass
+class MediaPolicy:
+    """The trust order that applies to one company."""
+
+    jurisdiction: Optional[str]
+    national: Tuple[str, ...] = ()
+    jurisdiction_known: bool = False
+    # How the list was obtained: "stored", "generated", or "none".
+    source: str = "none"
+    confidence: str = "low"
+    note: str = ""
+
+    def tier_of(self, url_or_host: str) -> str:
+        """Return the trust tier for one host."""
+        host = normalize_host(url_or_host)
+        if is_refused_host(host):
+            return "refused"
+
+        for known in PRIMARY_HOSTS:
+            if _matches(host, known):
+                return TIER_PRIMARY
+
+        if self.jurisdiction_known:
+            for known in self.national:
+                if _matches(host, known):
+                    return TIER_NATIONAL
+
+        for known in GLOBAL_HOSTS:
+            if _matches(host, known):
+                return TIER_GLOBAL
+
+        return TIER_FALLBACK
+
+    def rank(self, url_or_host: str) -> int:
+        """Sort key: lower is more trusted. Refused hosts sort last."""
+        tier = self.tier_of(url_or_host)
+        if tier == "refused":
+            return len(TIER_ORDER) + 1
+        return TIER_ORDER.index(tier)
+
+    @property
+    def description(self) -> str:
+        if not self.jurisdiction_known:
+            return (
+                "jurisdiction unknown or no press list available, so national "
+                "press could not be ranked; international wires rank first and "
+                "every other publication is read as unranked"
+            )
+        return (
+            f"jurisdiction {self.jurisdiction}: {len(self.national)} national "
+            f"titles ({self.source}, {self.confidence} confidence) rank above "
+            f"international wires"
+        )
+
+
+class MediaListStore:
+    """Country -> learned press list, persisted as JSON on disk."""
+
+    def __init__(self, path: Path = STORE_PATH) -> None:
+        self.path = path
+        self._data: Dict[str, dict] = {}
+        self._loaded = False
+
+    def _load(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        try:
+            if self.path.exists():
+                payload = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    self._data = payload
+        except Exception as exc:
+            logger.warning("Media list store unreadable | path=%s | %s", self.path, exc)
+            self._data = {}
+
+    def get(self, jurisdiction: str) -> Optional[dict]:
+        self._load()
+        return self._data.get((jurisdiction or "").upper())
+
+    def put(self, jurisdiction: str, entry: dict) -> None:
+        self._load()
+        self._data[(jurisdiction or "").upper()] = entry
+        self._save()
+
+    def _save(self) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(
+                json.dumps(self._data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception as exc:
+            logger.warning("Media list store unwritable | path=%s | %s", self.path, exc)
+
+    def jurisdictions(self) -> List[str]:
+        self._load()
+        return sorted(self._data.keys())
+
+
+_STORE = MediaListStore()
+
+
+def list_store() -> MediaListStore:
+    """Return the process-wide store."""
+    return _STORE
+
+
+def believe_domains(raw: Iterable[str]) -> Tuple[str, ...]:
+    """Validate a candidate list, keeping only plausible publications."""
+    kept: List[str] = []
+    rejected: List[str] = []
+
+    for item in raw:
+        host = normalize_host(str(item or ""))
+        if not looks_like_news_domain(host):
+            rejected.append(host or "(empty)")
+            continue
+        if host in kept:
+            continue
+        kept.append(host)
+
+    if rejected:
+        logger.info(
+            "Media list entries rejected | count=%s | hosts=%s",
+            len(rejected),
+            rejected[:8],
+        )
+    return tuple(kept)
+
+
+async def generate_media_list(jurisdiction: str) -> MediaPolicy:
+    """Ask the model which outlets are press in this country, then store it.
+
+    A jurisdiction with no country mapping yields no list rather than a guess:
+    ranking the wrong country's press first narrows every brief on that company
+    without anyone noticing.
+    """
+    code = (jurisdiction or "").strip().upper().split("-")[0]
+    country = JURISDICTION_COUNTRY.get(code)
+
+    if not country:
+        logger.info("Media list skipped | jurisdiction=%r has no country mapping", code)
+        return MediaPolicy(
+            jurisdiction=code or None,
+            jurisdiction_known=False,
+            source="none",
+            note=f"no country mapping for {code or 'unknown'}",
+        )
+
+    from app.services.llm_client import build_client
+
+    try:
+        client, model = build_client()
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": MEDIA_LIST_PROMPT},
+                {"role": "user", "content": f"COUNTRY: {country}"},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+        )
+        content = response.choices[0].message.content or ""
+        payload = json.loads(content)
+    except Exception as exc:
+        logger.warning("Media list generation failed | jurisdiction=%s | %s", code, exc)
+        return MediaPolicy(
+            jurisdiction=code,
+            jurisdiction_known=False,
+            source="none",
+            note=f"generation failed: {type(exc).__name__}",
+        )
+
+    raw_domains = payload.get("domains") or []
+    if not isinstance(raw_domains, (list, tuple)):
+        raw_domains = []
+
+    domains = believe_domains(raw_domains)
+    confidence = str(payload.get("confidence") or "low").lower()
+    note = str(payload.get("note") or "")[:200]
+
+    if not domains:
+        logger.info("Media list empty after validation | jurisdiction=%s", code)
+        return MediaPolicy(
+            jurisdiction=code,
+            jurisdiction_known=False,
+            source="none",
+            note="generated list had no plausible publication",
+        )
+
+    entry = {
+        "country": country,
+        "domains": list(domains),
+        "confidence": confidence,
+        "note": note,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _STORE.put(code, entry)
+
+    logger.info(
+        "Media list generated and stored | jurisdiction=%s | country=%s | "
+        "domains=%s | confidence=%s",
+        code, country, len(domains), confidence,
+    )
+    return MediaPolicy(
+        jurisdiction=code,
+        national=domains,
+        jurisdiction_known=True,
+        source="generated",
+        confidence=confidence,
+        note=note,
+    )
+
+
+COUNTRY_PROMPT = """You decide which country a company is based in.
+
+You receive a company name. Answer with the ISO 3166-1 alpha-2 country code of
+the country where its headquarters and primary operations sit.
+
+Rules:
+- Answer from the company's own identity: where it is registered and run, not
+  where its news happens to be reported.
+- If the company is a subsidiary or a local arm of a larger group, answer the
+  country of the group that the name refers to.
+- If you genuinely do not know the company, answer "unknown". A wrong country
+  aims every later search at the wrong press, which is worse than not aiming.
+
+Reply with JSON only:
+{"country": "JP|US|DE|...|unknown", "reason": "one short sentence"}"""
+
+
+async def infer_jurisdiction(company: str) -> Optional[str]:
+    """Ask the model which country a company is based in.
+
+    Used only when the registry could not name a legal entity and the company's
+    own domain does not carry a country suffix. A private firm like YKK has a
+    `.com` address, so the domain says nothing; the model's own knowledge of where
+    the company sits is the next cheapest source, and it is cheaper than a search.
+
+    An unusable answer returns None: a guessed country aims every later search at
+    the wrong press.
+    """
+    name = (company or "").strip()
+    if not name:
+        return None
+
+    from app.services.llm_client import build_client
+
+    try:
+        client, model = build_client()
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": COUNTRY_PROMPT},
+                {"role": "user", "content": f"COMPANY: {name}"},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+        )
+        payload = json.loads(response.choices[0].message.content or "")
+    except Exception as exc:
+        logger.warning("Country inference failed | company=%r | %s", name, exc)
+        return None
+
+    code = str(payload.get("country") or "").strip().upper()
+    if not code or code == "UNKNOWN" or len(code) != 2:
+        logger.info("Country inference returned nothing usable | company=%r", name)
+        return None
+
+    logger.info(
+        "Country inferred | company=%r | country=%s | %s",
+        name,
+        code,
+        str(payload.get("reason") or "")[:120],
+    )
+    return code
+
+
+async def resolve_policy(jurisdiction: Optional[str]) -> MediaPolicy:
+    """Return the trust order for a company, generating the list if needed.
+
+    A stored list is reused; a missing one is generated once and kept. Generation
+    costs one model call per country, which is why it is stored rather than
+    repeated per request.
+    """
+    code = (jurisdiction or "").strip().upper().split("-")[0]
+    if not code:
+        return MediaPolicy(
+            jurisdiction=None, jurisdiction_known=False, source="none",
+            note="no jurisdiction supplied",
+        )
+
+    stored = _STORE.get(code)
+    if stored and stored.get("domains"):
+        domains = believe_domains(stored["domains"])
+        if domains:
+            logger.info(
+                "Media list loaded from store | jurisdiction=%s | domains=%s",
+                code, len(domains),
+            )
+            return MediaPolicy(
+                jurisdiction=code,
+                national=domains,
+                jurisdiction_known=True,
+                source="stored",
+                confidence=str(stored.get("confidence") or "low"),
+                note=str(stored.get("note") or ""),
+            )
+
+    return await generate_media_list(code)
+
+
+def order_by_trust(
+    results: Sequence[dict],
+    policy: MediaPolicy,
+) -> List[dict]:
+    """Return results ordered best-trusted first, refused hosts removed."""
+    kept: List[dict] = []
+    refused: List[str] = []
+
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        host = host_of_result(result)
+        if is_refused_host(host):
+            refused.append(host)
+            continue
+        kept.append(result)
+
+    if refused:
+        logger.info(
+            "Refused hosts dropped | count=%s | hosts=%s",
+            len(refused),
+            sorted(set(refused))[:8],
+        )
+
+    return sorted(kept, key=lambda item: policy.rank(host_of_result(item)))
+
+
+def refused_domains() -> List[str]:
+    """Every host this product will never read. Published so it can be checked."""
+    return sorted(REFUSED_HOSTS)

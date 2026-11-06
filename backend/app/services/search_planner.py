@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
 from app.services.hiring import hiring_queries
 from app.services.llm_client import build_client
 from app.services.logger_service import get_logger
+from app.services.media_trust import MediaPolicy, is_refused_host
 
 logger = get_logger("search_planner")
 
@@ -122,6 +123,43 @@ def _resolve_domains(categories: List[str]) -> List[str]:
     return domains
 
 
+def _resolve_domains_for_jurisdiction(
+    categories: List[str],
+    policy: Optional[MediaPolicy],
+) -> List[str]:
+    """Map categories to domains, adding the company's own national press.
+
+    A company is covered where it lives. YKK is Japanese, and the international
+    wire list returns a decade of US litigation filings about it while missing
+    Nikkei entirely — so the national press learned for the company's registered
+    country is added to every planned round.
+
+    The national titles come first so Tavily's per-query result cap is spent on
+    them, with the registry categories behind. Refused hosts are never included.
+    """
+    national = policy.national if policy is not None else ()
+    domains: List[str] = []
+
+    for domain in national:
+        if domain not in domains and not is_refused_host(domain):
+            domains.append(domain)
+
+    for domain in _resolve_domains(categories):
+        if domain in domains or is_refused_host(domain):
+            continue
+        domains.append(domain)
+
+    if national:
+        logger.info(
+            "National press added to the plan | jurisdiction=%s | national=%s "
+            "| total_domains=%s",
+            policy.jurisdiction if policy else "?",
+            len(national),
+            len(domains),
+        )
+    return domains
+
+
 def _fallback_queries(company: str, purpose: str, fundamentals: bool) -> List[str]:
     """Extra queries used to widen coverage after the first round.
 
@@ -181,7 +219,11 @@ def _fallback_queries(company: str, purpose: str, fundamentals: bool) -> List[st
     ]
 
 
-def _fallback_plan(company: str, purpose: str) -> SearchPlan:
+def _fallback_plan(
+    company: str,
+    purpose: str,
+    policy: Optional[MediaPolicy] = None,
+) -> SearchPlan:
     """Heuristic plan used when the planner model is unavailable.
 
     Deliberately industry-agnostic: it searches financial categories only, so a
@@ -212,7 +254,7 @@ def _fallback_plan(company: str, purpose: str) -> SearchPlan:
     return SearchPlan(
         industry="general",
         categories=categories,
-        domains=_resolve_domains(categories),
+        domains=_resolve_domains_for_jurisdiction(categories, policy),
         queries=queries[:MAX_QUERIES],
         fallback_queries=_fallback_queries(company, purpose, fundamentals),
         fundamentals=fundamentals,
@@ -220,16 +262,19 @@ def _fallback_plan(company: str, purpose: str) -> SearchPlan:
     )
 
 
-def _sanitize(plan: SearchPlan, company: str, purpose: str) -> SearchPlan:
+def _sanitize(
+    plan: SearchPlan,
+    company: str,
+    purpose: str,
+    policy: Optional[MediaPolicy] = None,
+) -> SearchPlan:
     """Constrain a model-produced plan to what the registry and Tavily allow."""
     categories = [c for c in plan.categories if c in SOURCE_REGISTRY]
     if not categories:
         categories = list(DEFAULT_CATEGORIES)
     categories = categories[:MAX_DOMAIN_CATEGORIES]
 
-    domains = _resolve_domains(categories)
-
-    queries: List[str] = []
+    domains = _resolve_domains_for_jurisdiction(categories, policy)
     for query in plan.queries:
         text = query.strip()
         if not text:
@@ -240,7 +285,7 @@ def _sanitize(plan: SearchPlan, company: str, purpose: str) -> SearchPlan:
             queries.append(text)
 
     if not queries:
-        return _fallback_plan(company, purpose)
+        return _fallback_plan(company, purpose, policy)
 
     return SearchPlan(
         industry=plan.industry or "general",
@@ -267,8 +312,17 @@ def _parse_plan(content: str) -> SearchPlan:
 # Entry point
 # =============================================================================
 
-async def plan_searches(company: str, purpose: str) -> SearchPlan:
+async def plan_searches(
+    company: str,
+    purpose: str,
+    policy: Optional[MediaPolicy] = None,
+) -> SearchPlan:
     """Ask the model which queries and publishers to use for this company.
+
+    ``policy`` carries the press list learned for the company's registered country.
+    It decides which national titles are searched and read first, because a company
+    is covered where it lives and the international wire list alone misses
+    mid-sized non-US firms entirely.
 
     Falls back to a financial-only heuristic plan when the model is
     unavailable or returns something unusable, so retrieval never breaks.
@@ -308,7 +362,7 @@ async def plan_searches(company: str, purpose: str) -> SearchPlan:
         if not content:
             raise ValueError("planner returned empty content")
 
-        plan = _sanitize(_parse_plan(content), company, purpose)
+        plan = _sanitize(_parse_plan(content), company, purpose, policy)
         logger.info(
             "Search plan | industry=%s | categories=%s | fundamentals=%s | queries=%s",
             plan.industry,
@@ -320,7 +374,7 @@ async def plan_searches(company: str, purpose: str) -> SearchPlan:
 
     except Exception as exc:
         logger.warning("Search planner unavailable, using heuristic plan | %s", exc)
-        plan = _fallback_plan(company, purpose)
+        plan = _fallback_plan(company, purpose, policy)
         logger.info(
             "Search plan (fallback) | categories=%s | fundamentals=%s | queries=%s",
             plan.categories,

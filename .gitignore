@@ -30,3 +30,7 @@ bifrost/logs/
 
 # Local trial output. Contains research dumps that are not part of the source.
 TEST/
+
+# Runtime data generated per deployment: learned per-country press lists.
+data/
+backend/data/

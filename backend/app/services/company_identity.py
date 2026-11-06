@@ -322,6 +322,84 @@ def is_ambiguous(candidates: List[IdentityCandidate]) -> bool:
     return (candidates[0].confidence - candidates[1].confidence) < AMBIGUITY_MARGIN
 
 
+# Host suffixes that identify where an organisation is based. A company's own
+# domain is the most reliable signal for a private firm with no registry entry:
+# ykk.co.jp is a Japanese company, and its US litigation history is not a reason
+# to read it through an American press list.
+HOST_COUNTRY_SUFFIXES = (
+    (".co.jp", "JP"),
+    (".jp", "JP"),
+    (".co.kr", "KR"),
+    (".kr", "KR"),
+    (".com.cn", "CN"),
+    (".cn", "CN"),
+    (".com.hk", "HK"),
+    (".hk", "HK"),
+    (".com.sg", "SG"),
+    (".sg", "SG"),
+    (".com.my", "MY"),
+    (".my", "MY"),
+    (".co.in", "IN"),
+    (".in", "IN"),
+    (".com.tw", "TW"),
+    (".tw", "TW"),
+    (".co.th", "TH"),
+    (".th", "TH"),
+    (".com.vn", "VN"),
+    (".vn", "VN"),
+    (".co.id", "ID"),
+    (".id", "ID"),
+    (".com.au", "AU"),
+    (".au", "AU"),
+    (".co.nz", "NZ"),
+    (".co.uk", "GB"),
+    (".uk", "GB"),
+    (".de", "DE"),
+    (".fr", "FR"),
+    (".nl", "NL"),
+    (".be", "BE"),
+    (".it", "IT"),
+    (".es", "ES"),
+    (".se", "SE"),
+    (".dk", "DK"),
+    (".fi", "FI"),
+    (".no", "NO"),
+    (".ch", "CH"),
+    (".at", "AT"),
+    (".ie", "IE"),
+    (".pt", "PT"),
+    (".pl", "PL"),
+    (".cz", "CZ"),
+    (".gr", "GR"),
+    (".tr", "TR"),
+    (".ru", "RU"),
+    (".br", "BR"),
+    (".mx", "MX"),
+    (".ca", "CA"),
+)
+
+
+def jurisdiction_from_url(url: str) -> Optional[str]:
+    """Return the country a company's own web host implies, or None.
+
+    A company's domain is its own statement of where it is based, which matters
+    for a private firm that has no registry record: ykk.co.jp is Japanese even
+    though the only English-language coverage about it is American litigation.
+
+    A generic `.com` implies nothing and yields None. Guessing from it would aim
+    retrieval at the wrong country's press, which is worse than not aiming it.
+    """
+    host = (url or "").strip().lower()
+    if "//" in host:
+        host = host.split("//", 1)[1]
+    host = host.split("/")[0].split("?")[0].split(":")[0]
+
+    for suffix, code in HOST_COUNTRY_SUFFIXES:
+        if host.endswith(suffix):
+            return code
+    return None
+
+
 def jurisdiction_from_description(description: str) -> Optional[str]:
     """Return a country code named in the caller's description, if any.
 
