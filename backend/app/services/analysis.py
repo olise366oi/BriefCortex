@@ -9,7 +9,12 @@ from pydantic import ValidationError
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_random_exponential
 
 from app.core.config import get_settings
-from app.models.briefing import AuditRemoval, BriefingReport, LooseClaim
+from app.models.briefing import (
+    AuditRemoval,
+    BriefingReport,
+    ExecutiveSummary,
+    LooseClaim,
+)
 from app.services.bifrost_headers import build_bifrost_headers
 from app.services.llm_client import (
     LLMUnavailableError,
@@ -20,6 +25,17 @@ from app.services.llm_client import (
 from app.services.logger_service import get_logger
 from app.services.report_audit import audit_report
 from app.services.report_order import order_news
+from app.services.report_stages import (
+    ANALYSIS_PROMPT,
+    FINDINGS_PROMPT,
+    RECOMMENDATION_PROMPT,
+    AnalysisStage,
+    FindingsStage,
+    RecommendationStage,
+    render_analysis_input,
+    render_findings_input,
+    render_recommendation_input,
+)
 
 from .ingestion import FactBase
 
@@ -436,6 +452,82 @@ def _json_payload(content: str) -> str:
     return trimmed
 
 
+async def _call_stage_with_retry(
+    client: AsyncOpenAI,
+    model: str,
+    system_prompt: str,
+    user_message: str,
+    stage_model,
+    max_retries: int,
+    *,
+    stage: str,
+):
+    """Call one stage and validate its shape, feeding failures back on retry.
+
+    Each stage has its own schema, so a malformed reply is corrected against the
+    schema it was supposed to satisfy rather than against the whole report. The
+    error is fed back into the conversation: a plain retry would resend the same
+    prompt and repeat the same mistake.
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+    last_error: Exception = RuntimeError("no attempt executed")
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                response_format={"type": "json_object"},
+                temperature=0.2,
+            )
+            content = response.choices[0].message.content or ""
+            if not content.strip():
+                raise ValueError("model returned empty content")
+        except Exception as exc:
+            if is_permanent_error(exc):
+                raise BriefingGenerationError(
+                    f"[{stage}] request rejected and cannot be retried: {exc}"
+                ) from exc
+            last_error = exc
+            logger.warning("[%s] transport failed on attempt %s/%s | %s",
+                           stage, attempt, max_retries, exc)
+            if attempt == max_retries:
+                break
+            continue
+
+        try:
+            parsed = stage_model.model_validate_json(_json_payload(content))
+        except (ValidationError, ValueError) as exc:
+            last_error = exc
+            logger.warning("[%s] output rejected on attempt %s/%s | %s",
+                           stage, attempt, max_retries, exc)
+            if attempt == max_retries:
+                break
+            messages.append({"role": "assistant", "content": content})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"That response could not be parsed: {exc}. Reply with ONLY "
+                        "one JSON object matching the schema. No text before or "
+                        "after the object, no markdown fences, no commentary."
+                    ),
+                }
+            )
+            continue
+
+        logger.info("[%s] stage succeeded on attempt %s", stage, attempt)
+        return parsed
+
+    raise BriefingGenerationError(
+        f"[{stage}] output did not match its schema after {max_retries} attempts: "
+        f"{last_error}"
+    ) from last_error
+
+
 async def generate_briefing_report(
     fact_base: FactBase,
     meeting_purpose: str,
@@ -444,24 +536,26 @@ async def generate_briefing_report(
     *,
     company: str = "",
     description: str = "",
+    own_profile: Optional[str] = None,
 ) -> BriefingReport:
-    """Generate a validated BriefingReport from a FactBase.
+    """Generate a validated BriefingReport, in three stages.
 
-    ``previous`` is the earlier brief for the same company. It is passed as a
-    prior reading, never as evidence: the model reads the fact base fresh and
-    only afterwards states where it now disagrees, so a second brief cannot be
-    anchored to the first one's conclusion.
+    Stage 1 extracts findings and the audit runs on them. Stage 2 assesses the
+    surviving findings. Stage 3 writes the recommendation from the assessment.
+
+    ``previous`` is the earlier brief for the same company, passed as a prior
+    reading rather than evidence, so a second brief cannot be anchored to the
+    first one's conclusion.
 
     ``company`` and ``description`` are what the audit checks claims against.
-    Without them the audit can only check that a cited URL exists in the evidence,
-    which is necessary but not sufficient: every claim in a real failure case
-    cited a URL that did exist and was still about the wrong company.
 
-    Raises BriefingGenerationError if the LLM fails after max_retries.
+    ``own_profile`` describes the caller's own side. It reaches the recommendation
+    stage and nothing earlier: what we are is legitimate input to what to ask for,
+    and illegitimate input to what the evidence says.
     """
     logger.info(
         "Analysis started | company_id=%s | purpose=%r | mode=%s | hard_facts=%s | "
-        "analyst_opinions=%s | conflicts=%s | revision=%s",
+        "analyst_opinions=%s | conflicts=%s | revision=%s | own_profile=%s",
         fact_base.company_id,
         meeting_purpose,
         "negotiation" if meeting_purpose.strip() else "fundamentals",
@@ -469,42 +563,89 @@ async def generate_briefing_report(
         len(fact_base.analyst_opinions),
         len(fact_base.conflicts),
         previous is not None,
+        bool(own_profile and own_profile.strip()),
     )
     client, model = build_client()
-    user_message = _build_user_message(fact_base, meeting_purpose, previous)
-    report = await _call_llm_with_retry(
-        client,
-        model,
-        user_message,
-        max_retries,
-        fact_base,
-        meeting_purpose,
+
+    # ---- stage 1: findings -------------------------------------------------
+    findings_input = render_findings_input(fact_base, meeting_purpose, company)
+    findings = await _call_stage_with_retry(
+        client, model, FINDINGS_PROMPT, findings_input, FindingsStage, max_retries,
+        stage="findings",
     )
 
-    # Audit before delivery. A claim that is about another company, or that the
-    # evidence does not carry, is removed here: the reader never sees it, and
-    # removed_claims records that it happened.
+    report = BriefingReport(
+        news=findings.news,
+        hires=findings.hires,
+        executive_summary=ExecutiveSummary(
+            summary="", recommendation="", confidence=""
+        ),
+    )
+
+    # ---- audit, on the findings alone -------------------------------------
+    # The assessment is not written yet, so a claim that fails verification
+    # cannot have influenced it.
     audited, outcome = await audit_report(
         report,
         fact_base,
         company=company or fact_base.company_id,
         description=description,
     )
+    audited = order_news(audited)
+    if outcome.removed:
+        audited = audited.model_copy(
+            update={
+                "removed_claims": [
+                    AuditRemoval(
+                        section=entry["section"],
+                        claim=entry["claim"],
+                        verdict=entry["verdict"],
+                        remedy=entry["remedy"],
+                    )
+                    for entry in outcome.removed
+                ]
+            }
+        )
 
-    # A first brief has nothing to differ from. The prompt says so, but the
-    # comparison is structurally absent, so enforce it here rather than trusting
-    # a reply that might announce a change against a brief that never existed.
+    # ---- stage 2: analysis, reading only the surviving findings ----------
+    quote_text = fact_base.quote.content if fact_base.quote is not None else None
+    analysis_input = render_analysis_input(
+        audited.news.items,
+        audited.hires.items,
+        quote_text,
+        company,
+        fact_base.coverage.level,
+        fact_base.coverage.lanes_missing,
+    )
+    analysis_out = await _call_stage_with_retry(
+        client, model, ANALYSIS_PROMPT, analysis_input, AnalysisStage, max_retries,
+        stage="analysis",
+    )
+    audited = audited.model_copy(update={"analysis": analysis_out.analysis})
+
+    # ---- stage 3: recommendation, reasoning over the assessment ----------
+    recommendation_input = render_recommendation_input(
+        analysis_out.analysis,
+        meeting_purpose,
+        company,
+        own_profile or "",
+        fact_base.coverage.level,
+    )
+    summary_out = await _call_stage_with_retry(
+        client, model, RECOMMENDATION_PROMPT, recommendation_input,
+        RecommendationStage, max_retries, stage="recommendation",
+    )
+    audited = audited.model_copy(update={"executive_summary": summary_out.executive_summary})
+
+    # A first brief has nothing to differ from. The comparison is structurally
+    # absent, so enforce it here rather than trusting a reply that might announce
+    # a change against a brief that never existed.
     if previous is None and audited.changes_since_previous:
         logger.info(
             "Discarded changes on a first brief | claimed=%s",
             len(audited.changes_since_previous),
         )
         audited = audited.model_copy(update={"changes_since_previous": []})
-
-    # Ordering is a rule, not a preference: key events lead, then newest first.
-    # Applied after the audit so a removed claim cannot shift the reading order
-    # around a gap.
-    audited = order_news(audited)
     if outcome.removed:
         audited = audited.model_copy(
             update={

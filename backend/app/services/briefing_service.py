@@ -32,11 +32,16 @@ from app.services.analysis import generate_briefing_report
 from app.services.cache import DEFAULT_TTL_HOURS as CACHE_TTL_HOURS
 from app.services.cache_invalidation import InvalidationVerdict, check_reuse
 from app.services.evidence_fingerprint import evidence_fingerprint
+from app.services.own_profile import ProfileStore, resolve_profile
 from app.services.ingestion import _build_company_id, ingest_company_data
 from app.services.logger_service import get_logger
 from app.services.window import compute_evidence_window
 
 logger = get_logger("briefing_service")
+
+# The caller's own company profiles, held for this process. Read by the
+# recommendation stage only, never by the analysis.
+_profile_store = ProfileStore()
 
 MOCK_REPORT_PATH = Path(__file__).resolve().parents[1] / "mock" / "nio_briefing_report.json"
 
@@ -193,7 +198,19 @@ async def _generate_live_report(
     # calendar-keyed cache missed whenever a meeting moved by a day even though
     # nothing about the company had changed.
     description = getattr(record, "company_description", "") or ""
-    fingerprint = evidence_fingerprint(fact_base, record.meeting_purpose, description)
+    # A profile changes the recommendation, so it is part of what the brief is
+    # derived from. Without it in the fingerprint, two runs that differ only in
+    # whose position the advice is written for would share one cached answer.
+    profile = resolve_profile(
+        _profile_store,
+        getattr(record, "own_profile_name", "") or "",
+        getattr(record, "own_profile_inline", "") or "",
+    )
+    profile_text = profile.to_prompt_block() if profile is not None else ""
+
+    fingerprint = evidence_fingerprint(
+        fact_base, record.meeting_purpose, description, own_profile=profile_text
+    )
     briefing_repo = BriefingRepository(db)
     reused = briefing_repo.find_by_fingerprint(record.company_name, fingerprint)
     if reused is not None:
@@ -229,6 +246,7 @@ async def _generate_live_report(
         ),
         company=record.company_name,
         description=description,
+        own_profile=profile_text,
     )
     briefing_repo.update(record.id, evidence_fingerprint=fingerprint)
     return report, _build_evidence_summary(fact_base)
@@ -442,6 +460,8 @@ async def create_briefing(db: Session, request: BriefingRequest) -> uuid.UUID:
         status=BriefingJobStatus.PENDING.value,
         ticker=request.ticker,
         company_description=request.company_description,
+        own_profile_name=request.own_profile_name,
+        own_profile_inline=request.own_profile_inline,
     )
 
     _spawn_job(record.id, settings)

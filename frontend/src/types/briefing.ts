@@ -32,6 +32,8 @@ export interface Claim {
   source_url: string;
   /** ISO date of the report, or empty when the source carries none. */
   date?: string;
+  /** Earliest date the same event was reported, when it spans several reports. */
+  first_seen?: string;
   /** True for developments a reader preparing for this meeting needs. */
   key_event?: boolean;
 }

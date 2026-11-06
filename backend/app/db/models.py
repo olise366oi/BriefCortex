@@ -32,6 +32,9 @@ class BriefingRecord(Base):
     # The caller's own wording for the company, used when a name alone cannot
     # identify it. Stored so a re-run attributes evidence the same way.
     company_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Which own-company profile the recommendation was written for.
+    own_profile_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    own_profile_inline: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     report: Mapped[Optional[Dict[str, Any]]] = mapped_column(JsonColumn, nullable=True)
     # Provenance stored beside the report: the conflicts the engine found and

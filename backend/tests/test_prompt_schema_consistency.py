@@ -2,6 +2,11 @@ import re
 from pathlib import Path
 
 from app.services.analysis import BriefingReport, SYSTEM_PROMPT
+from app.services.report_stages import (
+    ANALYSIS_PROMPT,
+    FINDINGS_PROMPT,
+    RECOMMENDATION_PROMPT,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ANALYSIS_SOURCE = PROJECT_ROOT / "app" / "services" / "analysis.py"
@@ -106,12 +111,26 @@ def test_section_shape_match():
 def test_claim_fields_match():
     real = BriefingReport.model_json_schema()
     claim_props = list(real["$defs"]["Claim"]["properties"].keys())
-    # date and key_event exist so news can be delivered as an ordered timeline.
-    assert claim_props == ["claim", "source_url", "date", "key_event"], claim_props
-    assert re.search(
-        r'\{"claim": str, "source_url": str, "date": str, "key_event": bool\}',
-        _prompt_schema_block(),
-    )
+    # date, first_seen and key_event exist so news is delivered as a timeline
+    # whose events can span several reports.
+    assert claim_props == [
+        "claim", "source_url", "date", "first_seen", "key_event"
+    ], claim_props
+
+
+def test_the_findings_prompt_requests_every_claim_field():
+    block = FINDINGS_PROMPT[FINDINGS_PROMPT.index("Reply with JSON only:"):]
+    for field in ("claim", "source_url", "date", "first_seen", "key_event"):
+        assert field in block, field
+
+
+def test_the_three_stages_are_separate_prompts():
+    # Splitting generation is what lets the audit run between findings and
+    # assessment; a single prompt would put the finding and the judgement in the
+    # same reply again.
+    assert FINDINGS_PROMPT != ANALYSIS_PROMPT != RECOMMENDATION_PROMPT
+    assert "assessment" in ANALYSIS_PROMPT
+    assert "recommendation" in RECOMMENDATION_PROMPT
 
 
 def test_executive_summary_fields_match():

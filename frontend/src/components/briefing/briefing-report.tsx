@@ -1,4 +1,4 @@
-import { formatMeetingTime, getHostname } from "@/lib";
+import { formatMeetingTime, getHostname, stripUnverifiedTag } from "@/lib";
 import type {
   BriefingReport as BriefingReportType,
   EvidenceSummary,
@@ -34,6 +34,10 @@ export function BriefingReportView({
   const possible = report.possible_facts ?? [];
   const forward = report.forward_looking ?? [];
   const quote = report.quote ?? null;
+
+  // News events that are already dated, so the market block can point readers at
+  // the developments behind a price move instead of showing a bare number.
+  const datedEvents = report.news.items.filter((item) => item.key_event && item.date);
 
   return (
     <div className="flex flex-col gap-6">
@@ -173,23 +177,54 @@ export function BriefingReportView({
       ) : null}
 
       {/*
-        A market quote is a fact with a clock, so it leads the reference blocks
-        and carries its own timestamp. It is a quote, not reporting.
+        Market price, placed after hiring and before the analysis: it is a fact
+        like the others, not a header. The key events beside it are the ones
+        already reported, so a reader can see what sits behind the move instead
+        of meeting a number with no context.
       */}
       {quote ? (
-        <div className="clay-pill bg-white/80 px-4 py-2 flex items-center gap-2 self-start">
-          <span className="font-display font-extrabold text-xs uppercase tracking-wider text-grape">
-            Market
-          </span>
-          <span className="font-mono text-sm text-ink">{quote.claim}</span>
-          <a
-            className="font-mono text-xs text-ink/60 no-underline"
-            href={quote.source_url}
-            rel="noopener noreferrer"
-            target="_blank"
-          >
-            ↗
-          </a>
+        <div className="clay-surface-white p-7 flex flex-col gap-4">
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="w-9 h-9 rounded-2xl bg-white font-display font-extrabold text-base flex items-center justify-center shadow-[3px_4px_8px_rgba(124,92,255,0.2)] text-grape">
+              <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M3 3h2v18H3V3zm4 10h2v8H7v-8zm4-6h2v14h-2V7zm4 3h2v11h-2V10zm4-7h2v18h-2V3z" />
+              </svg>
+            </div>
+            <h3 className="font-display font-extrabold text-lg text-ink">Market</h3>
+            <a
+              className="clay-source-chip px-3 py-1 flex items-center gap-1.5 no-underline"
+              href={quote.source_url}
+              rel="noopener noreferrer"
+              target="_blank"
+            >
+              <span className="font-mono text-xs text-ink/70">
+                {getHostname(quote.source_url)}
+              </span>
+            </a>
+          </div>
+
+          <p className="font-mono text-base text-ink">{quote.claim}</p>
+
+          {datedEvents.length > 0 ? (
+            <div className="flex flex-col gap-2">
+              <span className="font-display font-bold text-xs uppercase tracking-wider text-grape">
+                Key events behind the move
+              </span>
+              {datedEvents.map((item, index) => (
+                <div
+                  key={`${item.date}-${index}`}
+                  className="flex items-start gap-3"
+                >
+                  <span className="font-mono text-xs text-ink/60 shrink-0 pt-0.5">
+                    {item.date}
+                  </span>
+                  <span className="font-body text-sm text-ink/85">
+                    {stripUnverifiedTag(item.claim)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </div>
       ) : null}
 

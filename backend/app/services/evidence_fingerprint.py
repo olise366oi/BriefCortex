@@ -40,6 +40,7 @@ def evidence_fingerprint(
     fact_base: FactBase,
     meeting_purpose: str = "",
     company_description: str = "",
+    own_profile: str = "",
 ) -> str:
     """Return a stable digest of everything the brief is derived from."""
     facts = sorted(_canonical(item.content) for item in fact_base.hard_facts)
@@ -51,6 +52,9 @@ def evidence_fingerprint(
             fact_base.company_id,
             _canonical(meeting_purpose),
             _canonical(company_description),
+            # The caller's own position shapes the recommendation, so two runs
+            # that differ only in that respect are different briefs.
+            _canonical(own_profile),
             "facts:",
             *facts,
             "postings:",

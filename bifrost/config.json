@@ -38,16 +38,5 @@
       "addr": "redis-bifrost:6379"
     }
   },
-  "plugins": [
-    {
-      "name": "semantic_cache",
-      "enabled": true,
-      "config": {
-        "dimension": 1,
-        "ttl": "30m",
-        "cache_by_model": true,
-        "cache_by_provider": true
-      }
-    }
-  ]
+  "plugins": []
 }

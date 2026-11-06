@@ -448,6 +448,7 @@ async def _route_and_collect(
     company: str,
     company_description: str = "",
     aliases: Optional[List[str]] = None,
+    objective: str = "",
 ) -> Tuple[List[FactItem], List[FactItem], List[FactItem], List[dict], dict]:
     """Route each article by its subject, then read it accordingly.
 
@@ -482,7 +483,9 @@ async def _route_and_collect(
                 {
                     "result": result,
                     "url": url,
-                    "clean_text": extract_clean_text(result.get("raw_content"), url) or "",
+                    "clean_text": extract_clean_text(
+                        result.get("raw_content"), url, company, objective
+                    ) or "",
                 }
             )
 
@@ -504,7 +507,9 @@ async def _route_and_collect(
         url = str(result.get("url") or "")
         if is_careers_url(url):
             continue
-        clean_text = extract_clean_text(result.get("raw_content"), url)
+        clean_text = extract_clean_text(
+            result.get("raw_content"), url, company, objective
+        )
         if not clean_text:
             continue
         prepared.append({"result": result, "url": url, "clean_text": clean_text})
@@ -969,7 +974,7 @@ async def ingest_company_data(
     hard_facts, analyst_opinions, hiring_items, other_articles, prepared, stats = (
         await _route_and_collect(
             fetched, window.window_start.isoformat(), company_label,
-            request.company_description, aliases,
+            request.company_description, aliases, request.meeting_purpose,
         )
     )
 

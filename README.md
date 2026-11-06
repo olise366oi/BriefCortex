@@ -105,6 +105,18 @@ Retrieval is not a single query against a flat domain list.
 
 **Planning.** `search_planner.py` asks the model for a search plan — which queries to run and which publisher categories to use. The model may only choose *categories* from a fixed source registry (`financial_wire`, `financial_business`, `asia_market`, `auto_industry`, `official_primary`); any category outside it is discarded, and domains are resolved from the registry, so a fabricated host can never reach the search API. When the model is unavailable the planner falls back to a deliberately industry-agnostic financial plan, so a bank and an automaker both get valid coverage.
 
+**The trusted publisher lists.** Every domain this product will search inside a category is published here, because "trusted" has to be checkable rather than claimed:
+
+| Category | Domains |
+|---|---|
+| `financial_wire` | `reuters.com`, `bloomberg.com` |
+| `financial_business` | `wsj.com`, `ft.com`, `cnbc.com`, `finance.yahoo.com`, `businessinsider.com`, `markets.businessinsider.com` |
+| `asia_market` | `nikkei.com` |
+| `auto_industry` | `autonews.gasgoo.com`, `cnevpost.com`, `insideevs.com`, `electrek.co` |
+| `official_primary` | `sec.gov`, `prnewswire.com`, `globenewswire.com`, `businesswire.com` |
+
+**When the list is not enough.** A regulator's case page, a company careers site and a founder's own blog are not publishers, and a brief that ignored them would miss the primary record. So a second round runs *outside* the registry (`open_queries`: jurisdiction-aware legal searches, hiring, and LinkedIn job listings). It is deliberately small — a handful of targeted queries, not a broad crawl — because the trade is explicit: outside the list, editorial standards are unknown and an unverified claim is more likely. Results from that round still pass the same subject routing, code-of-conduct filters and pre-delivery audit, and are marked by source in the report rather than trusted more because they were found.
+
 **Scoping.** Two rule tables are keyed by publisher and verified against live pages:
 
 - `SITE_SECTION_RULES` — keep/drop path prefixes, so opinion columns, live blogs, stock-quote tables and video pages are never read. Longest-domain matching keeps `markets.businessinsider.com` on its own rules, and year-indexed paths follow the calendar instead of a hard-coded year.
@@ -262,21 +274,6 @@ BriefCortex/
 | `repositories/` | Postgres data access only |
 | `core/` | Settings, DB engine/session, connection checks |
 
-### Not implemented
-
-These are referenced in design discussion but do not exist in the codebase. Listing
-them keeps the README honest about what a reader can actually run.
-
-| Item | Status |
-|------|--------|
-| Forward-looking statement lane | **Implemented** in-process (`forward_looking.py`): promises are removed from the model's evidence and delivered in their own lane. |
-| Stock/quote channel | **Implemented** in-process (`market_data.py`): a timestamped quote is fetched for a listed company when the caller supplies a ticker. |
-| Gateway-native plugin | **Missing.** `bifrost/` holds only `config.json`. Classification runs in-process and travels as `x-bf-*` headers; nothing is compiled into the gateway. |
-| Gateway-side cache invalidation | **Not in the gateway.** The rule is implemented in-process (`cache_invalidation.py`) before a stored brief is reused. Bifrost's `/api/config` and `/metrics` are auth-gated, so a gateway hook was not reachable. |
-| Multi-key rotation / 429 failover | **Missing.** One key per provider; a rate limit surfaces as a retry, not a failover. |
-| Dashboard / metrics endpoint | **Missing.** No `/metrics`, no usage dashboard. The debug console (`/debug`) is the only inspection surface. |
-| Forward-looking statement lane | **Missing.** CEO pledges and unverifiable promises are not yet separated from reported facts. |
-
 ### Frontend
 
 | Area | Responsibility |
@@ -353,7 +350,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 302 passed.
+Expected: 326 passed.
 
 > Test count is maintained locally while the frontend suite is still being
 > written; the shared baseline will be the sum of this backend count and whatever
@@ -402,6 +399,33 @@ BriefCortex is built for **companies that are written about**: listed groups,
 regulated industries, and firms large enough to have press coverage in the last
 30 days. For a small counterparty the honest output is the coverage ledger and
 the checklist, not a negotiation strategy.
+
+### Company registration records are not reachable
+
+This is a limit worth stating plainly, because a reader may otherwise assume the
+brief has checked it.
+
+Local business registries — a state companies house, a chamber of commerce, a
+ministry of trade — almost never expose a queryable API to a crawler. The pages
+that do exist are usually behind a form, a captcha or a paid account, and the
+greppable ones are often stale. So this product **cannot confirm registration
+status, incorporation date, paid-up capital, directors, shareholders or filing
+history from the registry of record** in most jurisdictions.
+
+What it does instead:
+
+- GLEIF is consulted for a **legal entity identifier**, which yields jurisdiction
+  and legal form for entities that have one. Many private companies do not.
+- When no registry match is found, the identity is **withheld rather than
+  guessed**, and the coverage ledger says so: no jurisdiction-specific source was
+  consulted, and corporate structure, ownership and filing history are
+  *unchecked*, not clean.
+- The checklist delivered with a thin brief names exactly these documents — filed
+  accounts, beneficial ownership, registration extract — as items for the reader
+  to obtain from the counterparty.
+
+A brief that reports a confident identity claim on a private company is reporting
+something this product did not establish.
 
 ---
 

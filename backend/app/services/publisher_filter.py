@@ -15,6 +15,7 @@ from app.services.source_rules import (
     SITE_BODY_RULES,
     SITE_SECTION_RULES,
 )
+from app.services.long_document import is_long_document, select_relevant
 from app.services.urls import host_of, url_path
 
 MIN_BODY_CHARS = 400
@@ -216,7 +217,12 @@ def rebuild_plain_prose(text: str) -> str:
     return "\n\n".join(lines)
 
 
-def extract_clean_text(raw_content: Optional[str], url: str) -> Optional[str]:
+def extract_clean_text(
+    raw_content: Optional[str],
+    url: str,
+    company: str = "",
+    objective: str = "",
+) -> Optional[str]:
     """Extract the article body from Tavily raw_content.
 
     Tavily returns page markdown, so the body is located first with the
@@ -228,6 +234,10 @@ def extract_clean_text(raw_content: Optional[str], url: str) -> Optional[str]:
     markdown, so the body is rebuilt from its prose lines instead of being
     thrown away. Dropping the article was the previous behaviour and it lost
     every result under ``include_raw_content="text"``.
+
+    A filing is 300,000 characters, most of it boilerplate. ``company`` and
+    ``objective`` let the long-document reader keep the sections that answer the
+    question instead of sending the whole filing into the fact base.
     """
     if not raw_content or not isinstance(raw_content, str):
         return None
@@ -271,5 +281,9 @@ def extract_clean_text(raw_content: Optional[str], url: str) -> Optional[str]:
     clean_text = clean_text.strip()
     if len(clean_text) < MIN_CLEAN_TEXT_LENGTH:
         return None
+
+    # A filing or a long IR page: keep the sections that answer the question.
+    if is_long_document(clean_text):
+        clean_text = select_relevant(clean_text, company, objective)
 
     return clean_text

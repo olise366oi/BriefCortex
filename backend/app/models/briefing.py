@@ -27,6 +27,11 @@ class BriefingRequest(BaseModel):
     # Exchange ticker, when the caller knows it. Without one no quote is fetched,
     # which is correct for a private company and avoids guessing a symbol.
     ticker: str = ""
+    # Which of the caller's own company profiles to use for the recommendation.
+    # Empty means none: the advice is then unauthored by the caller's position.
+    own_profile_name: str = ""
+    # A one-off profile, for a caller who does not want to save one first.
+    own_profile_inline: str = ""
 
 
 class BriefingAcceptedResponse(BaseModel):
@@ -84,6 +89,11 @@ class Claim(BaseModel):
     # ISO date (YYYY-MM-DD) of the report, or the best available date. Empty when
     # the source carries no date at all, which is stated rather than guessed.
     date: str = ""
+    # The earliest date this same event was reported. Set when several reports
+    # cover one event over time, so the reader sees the span of the development
+    # ("first reported 2026-10-07, latest 2026-10-29") rather than one arbitrary
+    # day. Empty when the claim is a single report.
+    first_seen: str = ""
     # True when this event is what the reader came for: a filed result, a
     # regulatory action, a funding round, a named partnership. Such items lead,
     # ahead of recency.
