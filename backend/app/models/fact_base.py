@@ -88,8 +88,15 @@ class FactBase(BaseModel):
     # Job postings, kept apart from reported facts: they signal intent rather
     # than asserting an outcome, and the model reads them as a separate block.
     hiring: List[FactItem] = []
+    # Market price for a listed company, timestamped. Kept out of hard_facts
+    # because it is a quote, not reporting, and it changes by the hour.
+    quote: Optional[FactItem] = None
     conflicts: List[dict] = []
     # Not evidence: a reading list for the human, isolated from the model path.
     incidental_facts: List[IncidentalFact] = []
+    # Stated intent about the future, removed from hard_facts before the model
+    # reasons. Kept here so the reader can see what is being promised without the
+    # brief treating a promise as an event.
+    forward_looking: List[FactItem] = []
     # What retrieval did and did not reach, plus the checks left to the reader.
     coverage: CoverageRecord = CoverageRecord()

@@ -1,5 +1,6 @@
 """Collect facts about our company that sit inside articles about others."""
 import asyncio
+import re
 from typing import List, Sequence, Tuple
 
 from app.models.fact_base import IncidentalFact

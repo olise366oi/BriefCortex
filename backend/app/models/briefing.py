@@ -24,6 +24,9 @@ class BriefingRequest(BaseModel):
     meeting_time: datetime
     meeting_purpose: str
     company_description: str = ""
+    # Exchange ticker, when the caller knows it. Without one no quote is fetched,
+    # which is correct for a private company and avoids guessing a symbol.
+    ticker: str = ""
 
 
 class BriefingAcceptedResponse(BaseModel):
@@ -185,6 +188,15 @@ class BriefingReport(BaseModel):
     # verify, and the reader sees these as leads beside the brief rather than
     # inside it.
     possible_facts: List[LooseClaim] = Field(default_factory=list)
+    # Stated intent about the future: CEO pledges, targets, guidance about what
+    # the company intends to do. Populated from the fact base, never by the
+    # model, and deliberately not read into the analysis — a promise is not
+    # evidence that something happened. Shown before possible_facts so the reader
+    # sees what is being promised before what is merely rumoured.
+    forward_looking: List[LooseClaim] = Field(default_factory=list)
+    # Market price, when the company is listed. Timestamped and kept out of
+    # hard_facts so it is obvious it is a quote, not reporting.
+    quote: Optional[LooseClaim] = None
 
 
 class EvidenceConflict(BaseModel):

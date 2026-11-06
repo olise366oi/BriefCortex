@@ -26,6 +26,8 @@ from app.services.freshness import (
     parse_publish_date,
     resolve_publish_dates,
 )
+from app.services.forward_looking import split_forward_looking
+from app.services.market_data import fetch_quote
 from app.services.article_subject import classify_article_subjects
 from app.services.company_identity import (
     disambiguate_with_model,
@@ -981,6 +983,33 @@ async def ingest_company_data(
     ]
     analyst_opinions = _merge_reused_facts(reused_opinions, analyst_opinions)
 
+    # A promise is not an event. Splitting them here keeps stated intent out of
+    # the evidence the model reasons over, so a recommendation can never rest on
+    # something the company merely said it would do. The promises are still
+    # delivered, in their own lane, for the reader to weigh.
+    hard_facts, forward_looking = split_forward_looking(hard_facts)
+    if forward_looking:
+        logger.info(
+            "Forward-looking statements separated | company=%r | promises=%s | events=%s",
+            company_label,
+            len(forward_looking),
+            len(hard_facts),
+        )
+
+    # A price is a fact with a clock, and no article is obliged to state today's
+    # number. Fetched only when the company has a ticker, so a private company
+    # simply has no quote rather than an invented one.
+    quote_item = None
+    ticker = request.ticker or ""
+    if ticker and window.needs_fetch:
+        quote = await asyncio.to_thread(fetch_quote, ticker)
+        if quote is not None:
+            quote_item = FactItem(
+                content=quote.to_line(),
+                source_url=quote.source_url,
+                publish_date=quote.as_of,
+            )
+
     # Facts about us that appear inside other companies' articles. They are kept
     # apart from the evidence the model reasons over: they exist so a reader can
     # follow up, not so the brief can lean on them.
@@ -1069,8 +1098,10 @@ async def ingest_company_data(
         hard_facts=hard_facts,
         analyst_opinions=analyst_opinions,
         hiring=hiring_items,
+        quote=quote_item,
         conflicts=[],
         incidental_facts=incidental,
+        forward_looking=forward_looking,
         coverage=CoverageRecord(
             level=coverage_report.level,
             total_facts=coverage_report.total_facts,

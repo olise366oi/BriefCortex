@@ -536,13 +536,35 @@ async def generate_briefing_report(
             }
         )
 
+    # Promises and the quote travel beside the brief, never inside the reasoning
+    # that produced it. The model's evidence excluded them at ingestion, so this
+    # only assembles what the reader should see.
+    forward = [
+        LooseClaim(claim=item.content, source_url=item.source_url)
+        for item in fact_base.forward_looking
+    ]
+    quote = (
+        LooseClaim(
+            claim=fact_base.quote.content,
+            source_url=fact_base.quote.source_url,
+        )
+        if fact_base.quote is not None
+        else None
+    )
+    if forward or quote is not None:
+        audited = audited.model_copy(
+            update={"forward_looking": forward, "quote": quote}
+        )
+
     logger.info(
         "Analysis complete | company_id=%s | recommendation_chars=%s | changes=%s "
-        "| claims_removed=%s | possible_facts=%s",
+        "| claims_removed=%s | possible_facts=%s | forward_looking=%s | quote=%s",
         fact_base.company_id,
         len(audited.executive_summary.recommendation),
         len(audited.changes_since_previous),
         outcome.total_removed,
         len(audited.possible_facts),
+        len(audited.forward_looking),
+        audited.quote is not None,
     )
     return audited

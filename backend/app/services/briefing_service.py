@@ -102,6 +102,8 @@ async def _generate_live_report(
         company_name=record.company_name,
         meeting_time=record.meeting_time,
         meeting_purpose=record.meeting_purpose,
+        company_description=getattr(record, "company_description", "") or "",
+        ticker=getattr(record, "ticker", "") or "",
     )
 
     company_id = _build_company_id(record.company_name)
@@ -438,6 +440,8 @@ async def create_briefing(db: Session, request: BriefingRequest) -> uuid.UUID:
         meeting_time=request.meeting_time,
         meeting_purpose=purpose,
         status=BriefingJobStatus.PENDING.value,
+        ticker=request.ticker,
+        company_description=request.company_description,
     )
 
     _spawn_job(record.id, settings)

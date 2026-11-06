@@ -20,6 +20,11 @@ AUDIT_SECTION = "removed_claims"
 # about other companies. Also absent from the prompt, so the model never presents
 # an unconfirmed sentence as a finding.
 POSSIBLE_SECTION = "possible_facts"
+# Stated intent about the future, and a market quote. Both are populated from the
+# fact base and deliberately withheld from the model's prompt: a promise is not
+# evidence that something happened.
+FORWARD_SECTION = "forward_looking"
+QUOTE_SECTION = "quote"
 
 
 def _prompt_schema_block() -> str:
@@ -36,8 +41,16 @@ def test_top_level_keys_match():
         REVISION_SECTION,
         AUDIT_SECTION,
         POSSIBLE_SECTION,
+        FORWARD_SECTION,
+        QUOTE_SECTION,
     ]
     assert real_top == expected, real_top
+
+
+def test_forward_looking_and_quote_are_never_requested_from_the_model():
+    block = _prompt_schema_block()
+    assert FORWARD_SECTION not in block
+    assert QUOTE_SECTION not in block
 
 
 def test_analysis_is_documented_in_the_prompt():

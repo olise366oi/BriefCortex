@@ -32,6 +32,8 @@ export function BriefingReportView({
   const changes = report.changes_since_previous ?? [];
   const removed = report.removed_claims ?? [];
   const possible = report.possible_facts ?? [];
+  const forward = report.forward_looking ?? [];
+  const quote = report.quote ?? null;
 
   return (
     <div className="flex flex-col gap-6">
@@ -164,6 +166,77 @@ export function BriefingReportView({
                   {note.change}
                 </span>
                 <span className="font-body text-xs text-ink/70">{note.why}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {/*
+        A market quote is a fact with a clock, so it leads the reference blocks
+        and carries its own timestamp. It is a quote, not reporting.
+      */}
+      {quote ? (
+        <div className="clay-pill bg-white/80 px-4 py-2 flex items-center gap-2 self-start">
+          <span className="font-display font-extrabold text-xs uppercase tracking-wider text-grape">
+            Market
+          </span>
+          <span className="font-mono text-sm text-ink">{quote.claim}</span>
+          <a
+            className="font-mono text-xs text-ink/60 no-underline"
+            href={quote.source_url}
+            rel="noopener noreferrer"
+            target="_blank"
+          >
+            ↗
+          </a>
+        </div>
+      ) : null}
+
+      {/*
+        What the company says it will do, kept apart from what it has done. Shown
+        before possible facts: a promise is a stated intent, a possible fact is an
+        unconfirmed rumour, and the reader should meet them in that order.
+      */}
+      {forward.length > 0 ? (
+        <div className="clay-surface-butter p-7 flex flex-col gap-4">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-2xl bg-white font-display font-extrabold text-base flex items-center justify-center shadow-[3px_4px_8px_rgba(255,209,102,0.25)] text-ink">
+              <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M12 2l3 7h7l-5.5 4.5 2 7-6.5-4.5-6.5 4.5 2-7L2 9h7z" />
+              </svg>
+            </div>
+            <div className="flex flex-col">
+              <h3 className="font-display font-extrabold text-lg text-ink">
+                Forward-looking statements
+              </h3>
+              <span className="font-body text-xs text-ink/60">
+                Stated intent, not reported events; excluded from the analysis
+              </span>
+            </div>
+            <span className="clay-token font-display font-extrabold text-xs px-2.5 py-0.5 bg-butter text-ink">
+              {forward.length}
+            </span>
+          </div>
+          <div className="flex flex-col gap-3">
+            {forward.map((item, index) => (
+              <div
+                key={`${item.source_url}-${index}`}
+                className="clay-input p-3.5 bg-white/80 flex items-center justify-between gap-3"
+              >
+                <span className="font-body text-sm font-medium text-ink">
+                  {item.claim}
+                </span>
+                <a
+                  className="clay-source-chip px-3 py-1 flex items-center gap-1.5 shrink-0 no-underline"
+                  href={item.source_url}
+                  rel="noopener noreferrer"
+                  target="_blank"
+                >
+                  <span className="font-mono text-xs text-ink/70">
+                    {getHostname(item.source_url)}
+                  </span>
+                </a>
               </div>
             ))}
           </div>

@@ -226,32 +226,56 @@ BriefCortex/
 | Area | Responsibility |
 |------|----------------|
 | `services/briefing_service.py` | Async job accept, cache lookup, status orchestration, stale-job recovery |
-| `services/ingestion.py` | Retrieval orchestration; assembles facts, opinions, hiring and incidental lanes |
+| `services/ingestion.py` | Retrieval orchestration; parallel lanes, fact assembly, window filtering |
 | `services/search_planner.py` | Model-driven search plan, constrained to a source registry |
 | `services/company_identity.py` | Registry lookup for jurisdiction and legal form (GLEIF) |
+| `services/entity_search.py` | Turns the caller's description into confirmable company candidates |
+| `services/entity_disambiguation.py` | Rejects possible facts that belong to a different same-named company |
 | `services/legal_signals.py` | Jurisdiction-aware searches for legal and regulatory exposure |
 | `services/source_rules.py` | Publisher registry and per-publisher extraction rules |
-| `services/publisher_filter.py` | URL scoping, article-body location, text extraction |
+| `services/publisher_filter.py` | URL scoping, article-body location, text extraction, plain-text recovery |
 | `services/fact_extraction.py` | Inverted-pyramid split, dedup, source ordering |
 | `services/freshness.py` | Publication dates, date fallback, reporting-period checks |
-| `services/article_subject.py` | Routes each article by who it is about |
+| `services/article_subject.py` | Routes each article by who it is about, using the caller's description |
 | `services/sentence_classifier.py` | Fact vs opinion labeling for incidental sentences |
-| `services/incidental*.py` | Facts about us found inside other companies' coverage |
+| `services/incidental.py`, `incidental_harvest.py` | Facts about us found inside other companies' coverage |
 | `services/corroboration.py` | Targeted follow-up search for an incidental fact |
-| `services/hiring.py` | Line-level hiring detection, careers-URL matching and hiring queries |
+| `services/hiring.py` | Line-level hiring detection, careers-URL matching, LinkedIn and hiring queries |
 | `services/job_postings.py` | Reads roles from a careers page's schema.org `JobPosting` markup, including per-platform detail-link discovery |
 | `services/dedup.py` | Two-stage fact merging that keeps every source |
-| `services/retention.py`, `scheduler.py` | Evidence expiry and URL decay, run on a daily loop |
+| `services/retention.py`, `retention_runner.py`, `scheduler.py` | Evidence expiry and URL decay, run on a daily loop |
 | `services/cache.py` | Exact-request cache key and TTL |
 | `services/evidence_fingerprint.py` | Evidence-set fingerprint, so a brief is reused when the facts match |
 | `services/cache_invalidation.py` | Cross-set contradiction check that invalidates a reusable brief |
-| `services/analysis.py` | LLM report generation and prompt assembly |
+| `services/analysis.py` | LLM report generation, prompt assembly, audit and ordering |
+| `services/report_audit.py` | Pre-delivery check: a claim about another company, or unsupported, is removed |
+| `services/report_order.py` | Key events first, then newest — the reading order of `news` |
+| `services/market_data.py` | Timestamped market quote for a listed company, fetched separately from the news |
+| `services/forward_looking.py` | Separates stated intent from reported events so a promise never becomes evidence |
+| `services/gateway_plugin.py` | Cache class, TTL and near-duplicate detection expressed as one gateway decision |
 | `services/conflict_detection.py` | Deterministic fact conflict engine |
 | `services/bifrost_headers.py` | Content-aware cache key and TTL derived from the evidence |
 | `services/llm_client.py` | Provider selection, retry policy, and the cached client every caller shares |
 | `services/keywords.py`, `urls.py`, `window.py` | Shared matchers, URL parsing, meeting-anchored window |
+| `services/tavily_search.py` | The single search call, dated and undated, plus targeted body extraction |
+| `services/logger_service.py` | Structured logging factory |
 | `repositories/` | Postgres data access only |
 | `core/` | Settings, DB engine/session, connection checks |
+
+### Not implemented
+
+These are referenced in design discussion but do not exist in the codebase. Listing
+them keeps the README honest about what a reader can actually run.
+
+| Item | Status |
+|------|--------|
+| Forward-looking statement lane | **Implemented** in-process (`forward_looking.py`): promises are removed from the model's evidence and delivered in their own lane. |
+| Stock/quote channel | **Implemented** in-process (`market_data.py`): a timestamped quote is fetched for a listed company when the caller supplies a ticker. |
+| Gateway-native plugin | **Missing.** `bifrost/` holds only `config.json`. Classification runs in-process and travels as `x-bf-*` headers; nothing is compiled into the gateway. |
+| Gateway-side cache invalidation | **Not in the gateway.** The rule is implemented in-process (`cache_invalidation.py`) before a stored brief is reused. Bifrost's `/api/config` and `/metrics` are auth-gated, so a gateway hook was not reachable. |
+| Multi-key rotation / 429 failover | **Missing.** One key per provider; a rate limit surfaces as a retry, not a failover. |
+| Dashboard / metrics endpoint | **Missing.** No `/metrics`, no usage dashboard. The debug console (`/debug`) is the only inspection surface. |
+| Forward-looking statement lane | **Missing.** CEO pledges and unverifiable promises are not yet separated from reported facts. |
 
 ### Frontend
 
@@ -329,7 +353,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 286 passed.
+Expected: 302 passed.
 
 > Test count is maintained locally while the frontend suite is still being
 > written; the shared baseline will be the sum of this backend count and whatever

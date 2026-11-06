@@ -9,6 +9,11 @@ export interface BriefingRequest {
    * businesses may trade under the same name.
    */
   company_description?: string;
+  /**
+   * Exchange ticker, when the caller knows it. Without one no quote is fetched,
+   * which is correct for a private company and avoids guessing a symbol.
+   */
+  ticker?: string;
 }
 
 export interface BriefingAcceptedResponse {
@@ -82,6 +87,13 @@ export interface BriefingReport {
   changes_since_previous?: RevisionNote[];
   /** Only present when the audit rejected something. */
   removed_claims?: AuditRemoval[];
+  /**
+   * Stated intent about the future — CEO pledges, targets. Never read into the
+   * analysis: a promise is not evidence that something happened.
+   */
+  forward_looking?: LooseClaim[];
+  /** Market price, timestamped. A quote, not reporting. */
+  quote?: LooseClaim | null;
   /** Only present when the evidence held facts from other companies' articles. */
   possible_facts?: LooseClaim[];
 }

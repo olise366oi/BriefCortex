@@ -26,6 +26,12 @@ class BriefingRecord(Base):
     company_name: Mapped[str] = mapped_column(String(255), nullable=False)
     meeting_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     meeting_purpose: Mapped[str] = mapped_column(Text, nullable=False)
+    # Exchange ticker for the quote lane. Empty for a private company, which is
+    # correct: no symbol is invented for a company that has none.
+    ticker: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # The caller's own wording for the company, used when a name alone cannot
+    # identify it. Stored so a re-run attributes evidence the same way.
+    company_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     report: Mapped[Optional[Dict[str, Any]]] = mapped_column(JsonColumn, nullable=True)
     # Provenance stored beside the report: the conflicts the engine found and

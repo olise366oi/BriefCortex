@@ -48,12 +48,16 @@ class BriefingRepository:
         meeting_time: datetime,
         meeting_purpose: str,
         status: str = "pending",
+        ticker: Optional[str] = None,
+        company_description: Optional[str] = None,
     ) -> BriefingRecord:
         record = BriefingRecord(
             company_name=company_name,
             meeting_time=meeting_time,
             meeting_purpose=meeting_purpose,
             status=status,
+            ticker=ticker or None,
+            company_description=company_description or None,
         )
         self.db.add(record)
         self.db.commit()
