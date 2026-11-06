@@ -1,43 +1,15 @@
 from __future__ import annotations
 
+from bifrost_cache_policy import CONFLICT_RULES as _RULE_TABLE
+
 from app.services.keywords import matched_keyword
 from app.models.fact_base import FactBase
 
+# The same rule table the gateway invalidation uses, imported rather than copied:
+# the in-report lane and the cache-invalidation lane must disagree about a fact
+# set in exactly the same cases, so they cannot hold two vocabularies.
 CONFLICT_RULES: list[tuple[str, list[str], list[str]]] = [
-    (
-        "headcount_up_down",
-        [
-            "layoff",
-            "reduction in force",
-            "rif",
-            "cut jobs",
-            "job cuts",
-            "cut roles",
-            "roles cut",
-        ],
-        [
-            "hiring",
-            "recruiting",
-            "hiring spree",
-            "expanding headcount",
-            "open roles",
-        ],
-    ),
-    (
-        "cost_up_down",
-        ["price hike", "price increase", "raising prices"],
-        ["price cut", "price reduction", "discount"],
-    ),
-    (
-        "expand_contract",
-        ["expansion", "new plant", "new factory"],
-        ["shutdown", "closing plant", "facility closure"],
-    ),
-    (
-        "profit_loss",
-        ["profitable", "profit growth"],
-        ["loss", "net loss", "wider loss"],
-    ),
+    (name, list(group_a), list(group_b)) for name, group_a, group_b in _RULE_TABLE
 ]
 
 

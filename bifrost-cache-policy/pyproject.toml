@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bifrost-cache-policy"
+version = "0.1.0"
+description = "Evidence-derived cache keys, graded TTLs and cross-set invalidation for the Bifrost AI gateway"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+live = ["httpx>=0.27"]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "live: needs a running Bifrost gateway; skipped unless BIFROST_URL is set",
+]

@@ -1,104 +1,39 @@
 # /backend/app/services/bifrost_headers.py
 """Content-aware cache headers derived from the evidence in the prompt.
 
-The TTL is a property of the evidence, not of the request: a brief built from
-same-day market material expires in a day, while one built from filings can be
-kept for a week. Classification runs on the fact texts themselves, so an
-ordinal such as "third quarter" can never be mistaken for a hiring signal.
+The rule itself lives in `bifrost_cache_policy`, the standalone package this
+repository publishes: a gateway extension has to be usable without importing a
+briefing pipeline, so the decision is computed by code that knows nothing about
+`FactBase`. This module is the briefing-shaped wrapper over it.
 """
 from __future__ import annotations
 
-import hashlib
-from typing import Dict, List, Sequence
+from typing import Dict, List
 
-from app.services.keywords import match_word
+from bifrost_cache_policy import build_cache_headers as _build_cache_headers
 
-# Ordered by precedence: a fact set is only as cacheable as its most perishable
-# member, so the first class with a hit wins.
-FACT_CLASSES: tuple[str, ...] = ("volatile", "structural", "primary")
-
-TTL_BY_CLASS: Dict[str, str] = {
-    "volatile": "24h",
-    "structural": "72h",
-    "primary": "168h",
-}
-
-DEFAULT_CLASS = "volatile"
-
-# Matched through the shared word-boundary matcher, so "shares" never fires on
-# "shareholders".
-CLASS_KEYWORDS: Dict[str, tuple[str, ...]] = {
-    "volatile": (
-        "announced",
-        "announces",
-        "breaking",
-        "earnings",
-        "guidance",
-        "profit warning",
-        "stock",
-        "shares",
-        "share price",
-        "rally",
-        "surge",
-        "plunge",
-        "tumble",
-        "slump",
-        "recall",
-        "probe",
-        "lawsuit",
-    ),
-    "structural": (
-        "hiring",
-        "hires",
-        "hired",
-        "headcount",
-        "appointed",
-        "appointment",
-        "appoints",
-        "chief executive",
-        "chief financial",
-        "succession",
-        "product launch",
-        "launched",
-        "launches",
-    ),
-    "primary": (
-        "annual report",
-        "10-k",
-        "10-q",
-        "proxy statement",
-        "press release",
-        "regulatory filing",
-        "segment revenue",
-        "balance sheet",
-    ),
-}
+# Re-exported so the classifier's vocabulary stays inspectable from here; the
+# precedence rule and the matching live in the package.
+from bifrost_cache_policy.ttl import (  # noqa: F401
+    CLASS_KEYWORDS,
+    DEFAULT_CLASS,
+    FACT_CLASSES,
+    TTL_BY_CLASS,
+    classify_fact_texts,
+    classify_ttl,
+)
 
 
-def classify_fact_texts(texts: Sequence[str]) -> str:
-    """Return the most volatile class present in the fact texts."""
-    for fact_class in FACT_CLASSES:
-        keywords = CLASS_KEYWORDS[fact_class]
-        if any(match_word(text, keyword) for text in texts for keyword in keywords):
-            return fact_class
-    return DEFAULT_CLASS
-
-
-def classify_ttl(fact_class: str) -> str:
-    """Map a class name to a cache TTL."""
-    return TTL_BY_CLASS.get(fact_class.strip().lower(), TTL_BY_CLASS[DEFAULT_CLASS])
-
-
-def evidence_digest(texts: Sequence[str]) -> str:
-    """Return a short stable digest over the fact texts."""
-    joined = "\n".join(texts)
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+def cache_partition(company_id: str) -> str:
+    """Return the gateway partition for one company's briefs."""
+    return company_id
 
 
 def build_bifrost_headers(
     company_id: str,
     meeting_purpose: str,
     fact_texts: List[str],
+    keywords: Dict[str, tuple[str, ...]] | None = None,
 ) -> Dict[str, str]:
     """Build the cache key and content-aware TTL for one briefing request.
 
@@ -106,14 +41,21 @@ def build_bifrost_headers(
     evidence — so a different objective or a refreshed fact base produces a
     different key instead of a stale hit.
     """
-    purpose_digest = hashlib.sha256(
-        meeting_purpose.strip().encode("utf-8")
-    ).hexdigest()[:12]
-    cache_key = f"{company_id}_{purpose_digest}_{evidence_digest(fact_texts)}"
-    fact_class = classify_fact_texts(fact_texts)
+    return _build_cache_headers(
+        cache_partition(company_id),
+        meeting_purpose,
+        list(fact_texts),
+        keywords,
+    )
 
-    return {
-        "x-bf-cache-key": cache_key,
-        "x-bf-cache-ttl": classify_ttl(fact_class),
-        "x-bf-content-class": fact_class,
-    }
+
+__all__ = [
+    "build_bifrost_headers",
+    "cache_partition",
+    "classify_fact_texts",
+    "classify_ttl",
+    "FACT_CLASSES",
+    "TTL_BY_CLASS",
+    "CLASS_KEYWORDS",
+    "DEFAULT_CLASS",
+]

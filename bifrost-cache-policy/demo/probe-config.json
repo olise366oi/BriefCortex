@@ -1,0 +1,53 @@
+{
+  "client": {
+    "drop_excess_requests": false,
+    "enable_logging": true,
+    "enforce_auth_on_inference": false
+  },
+  "providers": {
+    "deepseek": {
+      "keys": [
+        {
+          "name": "deepseek-primary",
+          "value": "env.DEEPSEEK_API_KEY",
+          "models": ["deepseek-flash", "deepseek-chat"],
+          "weight": 1.0
+        }
+      ]
+    }
+  },
+  "config_store": {
+    "enabled": true,
+    "type": "sqlite",
+    "config": {
+      "path": "/app/data/config.db"
+    }
+  },
+  "logs_store": {
+    "enabled": true,
+    "type": "sqlite",
+    "config": {
+      "path": "/app/data/logs.db"
+    }
+  },
+  "vector_store": {
+    "enabled": true,
+    "type": "redis",
+    "config": {
+      "addr": "bc-probe-redis:6379"
+    }
+  },
+  "plugins": [
+    {
+      "name": "semantic_cache",
+      "enabled": true,
+      "config": {
+        "dimension": 1,
+        "ttl": "5m",
+        "cache_by_model": true,
+        "cache_by_provider": true,
+        "disable_identity_scoping": true
+      }
+    }
+  ]
+}

@@ -272,6 +272,15 @@ Content-aware TTL travels as headers (`x-bf-cache-key`, `x-bf-cache-ttl`,
 
 → Fingerprint inputs, invalidation engine, gateway decision: **[ENGINEERING.md §8](ENGINEERING.md#8-caching)**.
 
+The gateway rules — cache key, graded TTL, cross-set invalidation — are published
+as a standalone package so a stock Bifrost install can adopt them without this
+pipeline: **[`bifrost-cache-policy/`](bifrost-cache-policy/README.md)**. Install
+it from the repo, add the three headers before the request leaves your process,
+and the gateway stores, serves and expires them. Verified against a stock
+`maximhq/bifrost:v2.4.0` container in direct (hash) mode: first request
+`x-bifrost-cache-hit=false`, identical second request `true`, refreshed evidence
+`false` again.
+
 ### 7. Tested, Not Vibes
 
 The repo ships with `pytest` coverage for the prompt/schema contract, the conflict engine, the extraction rules and the cache classifier, including:
@@ -306,6 +315,7 @@ BriefCortex/
 │   ├── migrations/           # Alembic revisions
 │   └── tests/
 ├── docs/                     # CLAUDE, KARPATHY
+├── bifrost-cache-policy/     # Standalone gateway cache rules (pip-installable)
 └── docker-compose.yml        # Postgres, Bifrost gateway, Redis Stack
 ```
 
@@ -344,9 +354,9 @@ BriefCortex/
 | `services/report_order.py` | Key events first, then newest — the reading order of `news` |
 | `services/market_data.py` | Timestamped market quote for a listed company, fetched separately from the news |
 | `services/forward_looking.py` | Separates stated intent from reported events so a promise never becomes evidence |
-| `services/gateway_plugin.py` | Cache class, TTL and near-duplicate detection expressed as one gateway decision |
-| `services/conflict_detection.py` | Deterministic fact conflict engine |
-| `services/bifrost_headers.py` | Content-aware cache key and TTL derived from the evidence |
+| `services/gateway_plugin.py` | Briefing-shaped gateway decision: one `GatewayDecision` per request |
+| `services/conflict_detection.py` | Deterministic in-report conflict lane, on the shared rule table |
+| `services/bifrost_headers.py` | Content-aware cache headers, wrapping the standalone policy package |
 | `services/llm_client.py` | Provider selection, retry policy, and the cached client every caller shares |
 | `services/keywords.py`, `urls.py`, `window.py` | Shared matchers, URL parsing, meeting-anchored window |
 | `services/tavily_search.py` | The single search call, dated and undated, plus targeted body extraction |
@@ -431,6 +441,15 @@ python -m pytest tests/ -v
 ```
 
 Expected: 386 passed.
+
+The gateway policy package ships its own suite, runnable without this backend:
+
+```bash
+cd bifrost-cache-policy
+pip install -e .
+pip install pytest
+python -m pytest tests -v              # 64 passed, 6 skipped (live cases)
+```
 
 > Test count is maintained locally while the frontend suite is still being
 > written; the shared baseline will be the sum of this backend count and whatever

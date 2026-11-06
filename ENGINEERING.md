@@ -245,14 +245,28 @@ reported. `detect_cross_set_conflicts` reuses the same rule engine and refuses
 reuse rather than serving a stale reading. Missing stored evidence also refuses
 reuse — an unverifiable cache hit is exactly what this prevents.
 
-**Gateway headers.** `services/bifrost_headers.py` sends `x-bf-cache-key`,
-`x-bf-cache-ttl` and `x-bf-content-class` per request, so the TTL is a property of
-the evidence (volatile 24h / structural 72h / primary 168h), classified by
-word-boundary matching on the fact texts. `services/gateway_plugin.py` adds a
-near-duplicate test (token containment, threshold 0.72) and returns one
-`GatewayDecision` for a gateway-side caller. Bifrost's own `semantic_cache` plugin
-is disabled: it was configured with `dimension: 1`, which cannot discriminate
-between prompts.
+**Gateway headers.** The rules behind `x-bf-cache-key`, `x-bf-cache-ttl` and
+`x-bf-content-class` live in `bifrost-cache-policy/`, a standalone package this
+repository publishes: a gateway extension has to be usable without the briefing
+pipeline, so the classifier, the evidence key and the cross-set check are
+computed by code that knows nothing about `FactBase`. `services/bifrost_headers.py`,
+`services/gateway_plugin.py` and `services/cache_invalidation.py` are the
+briefing-shaped wrappers over it, and `services/keywords.py` re-exports the same
+matcher so the extraction rules and the TTL classifier cannot diverge.
+
+The TTL is thus a property of the evidence (volatile 24h / structural 72h /
+primary 168h), classified by word-boundary matching on the fact texts, and sent
+per request. `gateway_plugin.py` adds a near-duplicate test (token containment,
+threshold 0.72) and returns one `GatewayDecision`.
+
+The ceiling of `semantic_cache` is what drove this: configured with
+`dimension: 1` it cannot discriminate between prompts, and it holds one global
+TTL. Run in **direct-only** mode (`dimension: 1`, no `provider`) it is exact
+hash matching, and the key and TTL arrive per request — verified against a stock
+`maximhq/bifrost:v2.4.0` container: first request `x-bifrost-cache-hit=false`,
+identical second request `true`, refreshed evidence or objective `false` again.
+`bifrost/config.json` in this repository therefore leaves the plugin disabled;
+enabling it is a deployment decision, documented in the package README.
 
 ## 9. LLM access
 
@@ -275,7 +289,8 @@ machine that has only psycopg2.
 
 ## 11. Testing
 
-`backend/tests/`, 326 tests. What they are for:
+`backend/tests/`, 386 tests, plus `bifrost-cache-policy/tests/`, 70. What they are
+for:
 
 - **Live-run regressions, not invented cases.** Every hiring-filter test uses a
   line an actual run produced. Every careers-URL case is a shape measured on a
@@ -287,6 +302,12 @@ machine that has only psycopg2.
 - **Rules as rules.** Ordering, window boundaries, cache reuse, invalidation,
   fingerprint stability, near-duplicate thresholds and long-document selection are
   all asserted directly.
+- **The gateway package on its own terms.** `bifrost-cache-policy/tests/` runs
+  without this backend at all, which is the point: it is a deliverable a
+  separate Bifrost deployment installs. Six of its cases are marked `live` and
+  drive a real gateway — first miss, second hit, refreshed evidence miss,
+  changed objective miss, no-key bypass, clear-by-key — skipped unless
+  `BIFROST_URL` is set so CI stays offline.
 
 Known gap: a missing import in a helper that only real runs reach was found twice
 in production-like runs and not by the suite. Where that has happened, a direct
