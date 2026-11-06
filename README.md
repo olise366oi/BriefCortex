@@ -4,6 +4,15 @@
 
 BriefCortex turns a company name and a meeting objective into a cold, evidence-backed negotiation brief in seconds — not a generic news digest.
 
+> **Also in this repository, and usable on its own:**
+> [`bifrost-cache-policy/`](bifrost-cache-policy/README.md) — a standalone,
+> pip-installable package that gives any [Bifrost](https://github.com/maximhq/bifrost)
+> gateway evidence-derived cache keys, graded TTLs and cross-set invalidation. It
+> depends on nothing in the pipeline below, so a deployment that never runs
+> BriefCortex can adopt it. **Start at
+> [`bifrost-cache-policy/README.md`](bifrost-cache-policy/README.md)** for its
+> install steps, API reference and measured behaviour.
+
 ---
 
 ## The Problem
