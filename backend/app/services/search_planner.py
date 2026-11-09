@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -92,6 +93,22 @@ class SearchPlan(BaseModel):
     local_queries: List[str] = Field(default_factory=list)
     # The language code those queries are written in.
     local_language: str = ""
+
+
+@dataclass(frozen=True)
+class ReplanResult:
+    """What to try after a first round returned nothing usable.
+
+    ``queries`` is empty when the model concluded the company has no coverage.
+    That is an answer, not a failure: it means the brief should say so and hand
+    the reader the manual checks, rather than pay for another empty search.
+    ``window_too_narrow`` records the one case a different search cannot fix —
+    nothing was published inside the evidence window.
+    """
+
+    queries: List[str]
+    reason: str = ""
+    window_too_narrow: bool = False
 
 
 PLANNER_PROMPT = """You plan web research for a pre-meeting intelligence brief.
@@ -395,3 +412,129 @@ async def plan_searches(
             plan.queries,
         )
         return plan
+
+
+# =============================================================================
+# Replanning after an empty first round
+# =============================================================================
+
+REPLAN_PROMPT = """You replan a web search that returned nothing.
+
+A first round of queries found no usable article about this company. The queries
+were not enough, not too specific, or aimed at the wrong kind of source. You
+decide what to try instead.
+
+You are told:
+- the company and the commercial objective,
+- the queries that were already run,
+- the publisher domains that were searched,
+- how many results each query returned before filtering.
+
+Do not repeat a query that was already run, and do not paraphrase it either.
+
+Choose a different angle, in this order of preference:
+1. **Widen the subject.** The company may be covered under a different name: its
+   legal name, a former name, a ticker, a parent, a subsidiary, a brand. Propose
+   a query using one of those instead of the name that failed.
+2. **Widen the topic.** If the queries were all about one angle (contract terms,
+   pricing), the company may only be covered generically — its results, its
+   guidance, its market. Propose a broader query.
+3. **Change the kind of source.** If the queries were restricted to financial
+   press and that returned nothing, the material may be in a trade publication,
+   a regulator's own page, or the company's own site. Say what kind of source to
+   look for in the query text.
+4. **Broaden the time range.** The evidence window is 30 days. If nothing was
+   published inside it, say so plainly and propose that the caller widen the
+   meeting date — a company with no coverage in the window cannot be briefed
+   from press, and that is a finding, not a failure.
+
+Reply with JSON only:
+{{"queries": ["query", ...], "reason": "one sentence naming which of the four you chose and why", "window_too_narrow": true|false}}
+
+Return at most {max_queries} queries. If you conclude the company genuinely has
+no coverage — a private firm, a name collision, a dormant entity — return an
+empty list and set window_too_narrow to false. An empty list is a valid answer
+and is better than inventing queries that will also return nothing."""
+
+
+async def replan_after_empty(
+    company: str,
+    purpose: str,
+    tried_queries: List[str],
+    searched_domains: List[str],
+    empty_counts: Dict[str, int] | None = None,
+    max_queries: int = 3,
+) -> "ReplanResult":
+    """Ask the model for different queries after a first round found nothing.
+
+    This runs only when the opening lanes returned no usable body at all, so it
+    costs one model call on the runs that would otherwise deliver an empty
+    brief. It is deliberately not a retry of the same queries: repeating a
+    search that returned nothing returns nothing again.
+    """
+    tried = [" ".join(q.split()) for q in (tried_queries or []) if q and q.strip()]
+    domains = sorted({d for d in (searched_domains or []) if d})
+    counts = empty_counts or {}
+
+    lines = [
+        f"COMPANY: {company}",
+        f"COMMERCIAL OBJECTIVE: {purpose.strip() or '(none supplied — fundamentals brief)'}",
+        "",
+        "QUERIES ALREADY RUN (each returned no usable article):",
+    ]
+    if tried:
+        for query in tried[:12]:
+            note = counts.get(query)
+            lines.append(f"- {query}" + (f"  ({note} results before filtering)" if note else ""))
+    else:
+        lines.append("- (none recorded)")
+
+    lines.extend(["", "PUBLISHER DOMAINS SEARCHED:"])
+    lines.append("- " + ", ".join(domains) if domains else "- (open web, no domain restriction)")
+    lines.extend(["", "Replan the search."])
+
+    try:
+        client, model = build_client()
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": REPLAN_PROMPT.format(max_queries=max_queries),
+                },
+                {"role": "user", "content": "\n".join(lines)},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
+        content = response.choices[0].message.content or ""
+        if not content.strip():
+            raise ValueError("replan returned empty content")
+        payload = json.loads(content)
+        if not isinstance(payload, dict):
+            raise ValueError("replan reply was not a JSON object")
+
+        raw_queries = payload.get("queries") or []
+        queries: List[str] = []
+        for item in raw_queries:
+            text = " ".join(str(item or "").split())
+            if not text or text in tried or text in queries:
+                continue
+            queries.append(text)
+
+        result = ReplanResult(
+            queries=queries[:max_queries],
+            reason=str(payload.get("reason") or "").strip(),
+            window_too_narrow=bool(payload.get("window_too_narrow")),
+        )
+        logger.info(
+            "Replan after empty round | company=%r | queries=%s | reason=%s",
+            company,
+            result.queries,
+            result.reason,
+        )
+        return result
+
+    except Exception as exc:
+        logger.warning("Replan unavailable | company=%r | %s", company, exc)
+        return ReplanResult(queries=[], reason="", window_too_narrow=False)

@@ -106,6 +106,34 @@ the round cap or the budget was reached. **The constraint on coverage is the
 supplied query list, not these constants** — which is why the planner is asked
 for objective-specific queries and why the counterparty lane was added.
 
+### 3.2c Replanning once when the opening round is empty
+
+`search_planner.replan_after_empty`, called from `ingestion._supplement_empty_round`.
+When every lane returns zero usable results the plan itself was the problem, so
+the model is shown what already failed — the queries, the domains, the per-query
+result counts — and asked for a different angle:
+
+| Order | What it changes |
+|---|---|
+| 1 | the subject: legal name, ticker, parent, subsidiary, brand |
+| 2 | the topic: a broader angle instead of the one that failed |
+| 3 | the kind of source: trade press, regulator page, company site |
+| 4 | nothing — reports that the window holds no coverage |
+
+Constraints:
+
+- **Once per request.** A company nobody writes about must not spend a model call
+  and a Tavily round on every run (`SUPPLEMENT_MAX_QUERIES = 3` bounds the round).
+- **Open web, undated.** The usual reason a company is invisible to the financial
+  press is that it is covered elsewhere; `_drop_out_of_window` still rejects
+  anything outside the window afterwards.
+- **Not a retry.** A query already tried is removed from the reply, because
+  repeating a search that returned nothing returns nothing again.
+- **An empty answer is honoured.** `window_too_narrow=True` or `queries=[]` are
+  both valid, and neither triggers another search. The brief then says the
+  coverage was empty and delivers `checks_to_run` — five things the reader can
+  obtain directly from a registry, which is more useful than a second empty round.
+
 ### 3.3 Reading
 
 `services/publisher_filter.py`. Two rule tables, both verified against live pages:
@@ -349,7 +377,7 @@ machine that has only psycopg2.
 
 ## 11. Testing
 
-`backend/tests/`, 454 tests, plus `bifrost-cache-policy/tests/`, 74. What they are
+`backend/tests/`, 466 tests, plus `bifrost-cache-policy/tests/`, 74. What they are
 for:
 
 - **Live-run regressions, not invented cases.** Every hiring-filter test uses a

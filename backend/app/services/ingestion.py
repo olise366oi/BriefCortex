@@ -64,7 +64,7 @@ from app.services.media_trust import (
 )
 from app.services.logger_service import get_logger
 from app.services.publisher_filter import extract_clean_text
-from app.services.search_planner import SearchPlan, plan_searches
+from app.services.search_planner import SearchPlan, plan_searches, replan_after_empty
 from app.services.tavily_search import extract_bodies, tavily_search
 from app.services.window import compute_evidence_window
 
@@ -109,6 +109,11 @@ MIN_POSTING_LINE_CHARS = 20
 
 # Cap roles per source so one aggregator page cannot fill the hiring block.
 MAX_POSTINGS_PER_SOURCE = 10
+
+# Queries a replanned round may propose after the opening lanes found nothing.
+# Deliberately small: this round exists to try a different angle, not to run a
+# second full plan.
+SUPPLEMENT_MAX_QUERIES = 3
 
 async def _search_query(
     query: str,
@@ -271,6 +276,69 @@ async def _refill_missing_bodies(
     return merged
 
 
+async def _supplement_empty_round(
+    plan: SearchPlan,
+    start_date: str,
+    end_date: str,
+    company_name: str,
+    merged: List[dict],
+    seen_urls: set,
+    aliases: Optional[List[str]],
+    meeting_purpose: str = "",
+    tried_queries: Optional[List[str]] = None,
+) -> int:
+    """One replanned round after the opening lanes found nothing usable.
+
+    The first round asks the planner what to search; this one asks it what to
+    search *instead*, and is told why the first attempt failed — the queries, the
+    domains, and the result counts. It runs against the open web rather than the
+    publisher registry, because the reason a company is invisible to the
+    financial press is usually that it is covered somewhere else: a trade
+    publication, a regulator's page, its own site.
+
+    Returns how many usable results it added. Zero is a normal and expected
+    answer: the model may reply that the company has no coverage in the
+    window, and that finding belongs in the coverage ledger rather than in
+    another paid search.
+    """
+    result = await replan_after_empty(
+        company_name,
+        meeting_purpose,
+        tried_queries or list(plan.queries),
+        list(plan.domains),
+        max_queries=SUPPLEMENT_MAX_QUERIES,
+    )
+
+    if result.window_too_narrow:
+        logger.info(
+            "Supplement skipped | nothing published inside the window | company=%r",
+            company_name,
+        )
+        return 0
+
+    if not result.queries:
+        logger.info(
+            "Supplement skipped | no further queries proposed | company=%r | reason=%s",
+            company_name,
+            result.reason or "(none given)",
+        )
+        return 0
+
+    logger.info(
+        "Supplement round | queries=%s | reason=%s", result.queries, result.reason
+    )
+
+    # Open web, no domain restriction: the point is to reach the sources the
+    # publisher registry does not contain. A supplement has no publish date
+    # guarantee either, so it runs undated and the window filter rejects anything
+    # outside it afterwards.
+    _kept, usable, _added = await _run_round(
+        result.queries, [], start_date, end_date, company_name,
+        merged, seen_urls, aliases, dated=False,
+    )
+    return usable
+
+
 async def _search_plan(
     plan: SearchPlan,
     start_date: str,
@@ -282,6 +350,7 @@ async def _search_plan(
     linkedin_queries: Optional[List[str]] = None,
     local_queries: Optional[List[str]] = None,
     local_domains: Optional[List[str]] = None,
+    meeting_purpose: str = "",
 ) -> List[dict]:
     """Run the planned queries until two consecutive rounds bring nothing new.
 
@@ -377,6 +446,29 @@ async def _search_plan(
         lane_labels, usable, added, len(known_before), len(merged),
         time.monotonic() - started_at,
     )
+
+    # Nothing usable came back from any lane. Replanning is not a retry: repeating
+    # a search that returned nothing returns nothing again, so the model is asked
+    # for a different angle (a legal name, a broader topic, another kind of
+    # source) and the answer may legitimately be "this company has no coverage".
+    #
+    # The bound is one attempt per request. A company nobody writes about would
+    # otherwise pay a model call and a round of Tavily on every run and learn
+    # nothing, and the coverage ledger already tells the reader what to check by
+    # hand when the open web cannot answer.
+    if usable == 0 and time.monotonic() - started_at < SEARCH_BUDGET_SECONDS:
+        supplement = await _supplement_empty_round(
+            plan, start_date, end_date, company_name, merged, seen_urls, aliases,
+            meeting_purpose=meeting_purpose,
+            tried_queries=list(plan.queries) + list(open_queries or []),
+        )
+        if supplement:
+            usable += supplement
+            added += supplement
+            logger.info(
+                "Supplement round added sources | usable=%s | total=%s",
+                supplement, len(merged),
+            )
 
     merged = await _refill_missing_bodies(
         merged, plan, start_date, end_date, company_name, aliases
@@ -1100,6 +1192,7 @@ async def ingest_company_data(
             linkedin_queries=linkedin_queries,
             local_queries=local_queries,
             local_domains=local_domains,
+            meeting_purpose=request.meeting_purpose.strip(),
         )
     else:
         # Everything up to today is already covered, so reuse what is stored
