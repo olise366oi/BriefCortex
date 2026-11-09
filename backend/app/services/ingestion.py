@@ -28,6 +28,7 @@ from app.services.freshness import (
 )
 from app.services.forward_looking import split_forward_looking
 from app.services.market_data import fetch_quote
+from app.services.ticker import resolve_ticker
 from app.services.article_subject import classify_article_subjects
 from app.services.company_identity import (
     CompanyIdentity,
@@ -983,6 +984,79 @@ def _company_tokens(company: str) -> List[str]:
     return parts
 
 
+CAREERS_URL_SHAPES = (
+    "https://{domain}/careers",
+    "https://{domain}/en-us/pages/careers",
+    "https://{domain}/pages/careers",
+    "https://{domain}/about/careers",
+    "https://careers.{domain}",
+)
+
+
+async def _probe_own_careers(
+    company: str,
+    fetched: List[dict],
+    aliases: Optional[List[str]],
+) -> List[FactItem]:
+    """Read the company's own careers page when no search result produced roles.
+
+    A careers page is the one hiring source that does not depend on a search engine
+    ranking it. Only URLs Tavily returned were ever read, so a company whose board
+    does not surface for its own name had no hiring lane at all — measured, Canada
+    Goose reported `hiring=0` on every run while its own site linked to a Workday
+    board carrying 96 roles.
+
+    The candidates are the shapes a company careers page actually takes. The
+    domain comes from the search results that were already fetched (the most
+    frequent host that belongs to the company), falling back to the name-derived
+    domain. Each candidate is tried once and the search stops at the first board
+    that answers, so a run costs at most a handful of requests and usually one.
+    """
+    domain = _company_host_from(fetched, company) or _likely_company_domain(company)
+    if not domain:
+        return []
+
+    for template in CAREERS_URL_SHAPES:
+        url = template.format(domain=domain)
+        try:
+            postings = await asyncio.to_thread(postings_from_url, url)
+        except Exception as exc:
+            logger.info("Careers probe unreadable | url=%s | %s", url, exc)
+            continue
+        if not postings:
+            continue
+        logger.info("Careers probe found a board | url=%s | roles=%s", url, len(postings))
+        return [
+            FactItem(content=posting.to_line(), source_url=url)
+            for posting in postings[:MAX_POSTINGS_PER_SOURCE]
+        ]
+
+    logger.info("Careers probe found no board | company=%r | domain=%s", company, domain)
+    return []
+
+
+def _company_host_from(fetched: List[dict], company: str) -> str:
+    """Return the company's own host from results already fetched, or empty.
+
+    Judged by the host containing the company's own name token, so a run for
+    "Canada Goose" accepts canadagoose.com and not the wires that covered it.
+    """
+    token = re.sub(r"[^a-z0-9]+", "", (company or "").lower())
+    if len(token) < 3:
+        return ""
+
+    counts: dict[str, int] = {}
+    for result in fetched:
+        host = host_of(str(result.get("url") or ""))
+        if token in host.replace("-", "").replace(".", ""):
+            counts[host] = counts.get(host, 0) + 1
+
+    if not counts:
+        return ""
+    best = max(counts, key=counts.get)
+    return best[4:] if best.startswith("www.") else best
+
+
 def _collect_posting(
     clean_text: str,
     source_url: str,
@@ -1249,6 +1323,18 @@ async def ingest_company_data(
         )
     )
 
+    # A careers page is the one hiring source that does not need a search engine.
+    # Only what Tavily returned was ever read, so a company whose board does not
+    # rank for its own name had no hiring lane at all — measured: Canada Goose
+    # reported `hiring=0` across every run while its own site linked to a board
+    # carrying 96 roles. Probing the known shapes of a company careers URL costs
+    # one request per candidate shape and stops as soon as one answers.
+    if window.needs_fetch and not hiring_items:
+        probed = await _probe_own_careers(company_label, fetched, aliases)
+        if probed:
+            hiring_items.extend(probed)
+            logger.info("Hiring from the company's own board | roles=%s", len(probed))
+
     # Stored evidence was retrieved on an earlier run; it belongs to the same
     # company and the same window, so it is merged rather than re-fetched.
     #
@@ -1276,18 +1362,35 @@ async def ingest_company_data(
         )
 
     # A price is a fact with a clock, and no article is obliged to state today's
-    # number. Fetched only when the company has a ticker, so a private company
-    # simply has no quote rather than an invented one.
+    # number. A caller who supplied a ticker gets that listing; one who did not
+    # gets the symbol resolved from the company name, because otherwise a brief on
+    # a listed company simply had no price — measured, five stored briefs for
+    # Canada Goose (GOOS on NYSE, GOOS.TO on Toronto) carried none.
+    #
+    # The resolver refuses to guess: a name search for a private group returns
+    # symbols belonging to unrelated companies (measured, "YKK" matched two Finnish
+    # firms), and a wrong price is worse than no price. A company with no confident
+    # match therefore has no quote, rather than an invented one.
     quote_item = None
-    ticker = request.ticker or ""
-    if ticker and window.needs_fetch:
-        quote = await asyncio.to_thread(fetch_quote, ticker)
-        if quote is not None:
-            quote_item = FactItem(
-                content=quote.to_line(),
-                source_url=quote.source_url,
-                publish_date=quote.as_of,
-            )
+    if window.needs_fetch:
+        ticker = request.ticker.strip()
+        if not ticker:
+            match = await asyncio.to_thread(resolve_ticker, company_label)
+            ticker = match.symbol if match else ""
+            if ticker:
+                logger.info(
+                    "Ticker resolved from the name | company=%r | symbol=%s",
+                    company_label,
+                    ticker,
+                )
+        if ticker:
+            quote = await asyncio.to_thread(fetch_quote, ticker)
+            if quote is not None:
+                quote_item = FactItem(
+                    content=quote.to_line(),
+                    source_url=quote.source_url,
+                    publish_date=quote.as_of,
+                )
 
     # Facts about us that appear inside other companies' articles. They are kept
     # apart from the evidence the model reasons over: they exist so a reader can

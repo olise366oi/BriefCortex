@@ -27,6 +27,27 @@ from app.services.keywords import match_word
 # and treating them as boards wasted nine page fetches per run.
 CAREERS_HOST_PREFIXES = ("careers.", "recruiting.", "jobs.")
 
+# Applicant-tracking hosts. An employer's openings are published on the vendor's
+# domain (`canadagoose.wd3.myworkdayjobs.com`, `jobs.lever.co`), so the URL reads
+# like a job board even though it is the company's own board. Recognising these
+# is what routes them to the hiring lane instead of the fact base: measured, a
+# Workday board URL was not matched by any careers rule, so its listings would
+# have been mined as reporting.
+ATS_HOST_MARKERS = (
+    "myworkdayjobs.com",
+    "workday.com",
+    "lever.co",
+    "greenhouse.io",
+    "icims.com",
+    "smartrecruiters.com",
+    "workable.com",
+    "jobvite.com",
+    "bamboohr.com",
+    "recruitee.com",
+    "personio.com",
+    "ashbyhq.com",
+)
+
 # A segment that names a careers area in full.
 CAREERS_SEGMENTS = frozenset(
     ("career", "careers", "job", "jobs", "vacancy", "vacancies", "recruitment", "recruiting")
@@ -214,6 +235,10 @@ def is_careers_url(url: str) -> bool:
     host = host.split(":")[0]
     if host.startswith("www."):
         host = host[len("www."):]
+
+    # An applicant-tracking host is the company's own board, whatever its path.
+    if any(host == marker or host.endswith("." + marker) for marker in ATS_HOST_MARKERS):
+        return True
 
     if any(
         host == prefix.rstrip(".") or host.startswith(prefix)

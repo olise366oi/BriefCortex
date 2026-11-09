@@ -245,6 +245,31 @@ runs — they never reach the fact base whatever they say or whoever links them.
 The full refusal list is `REFUSED_HOSTS` in `services/media_trust.py`. Rumour is
 a claim about a claim, not a source.
 
+**An employer's own board is not a job board.** Workday, Lever, Greenhouse and
+similar applicant-tracking hosts read like aggregators, but
+`canadagoose.wd3.myworkdayjobs.com` *is* Canada Goose's careers site: the company's
+openings, published by the company, reached through a vendor's front end. Those
+hosts are recognised as careers pages (`hiring.is_careers_url`) and their roles are
+read from the vendor's own JSON listing rather than from HTML — the board's HTML is
+a shell (measured: 7,446 bytes, zero postings) while the listing endpoint answered
+with all 96. Third-party aggregators (Indeed, Glassdoor, Eluta) stay refused.
+
+**The board may be behind the page, not on it.** An employer's own careers page
+often lists nothing and links out to its vendor board — measured,
+`canadagoose.com/en-us/pages/careers` is a Shopify page whose only job links are
+two absolute Workday URLs. When a careers page yields no postings, the board it
+points at is read instead; that is where the 96 roles came from.
+
+**A price needs a ticker, and a ticker needs an identity.** The quote is fetched
+from a symbol resolved from the company name (`services/ticker.py`), so a listed
+company no longer depends on the caller typing one — measured, five stored briefs
+for Canada Goose (GOOS on NYSE, GOOS.TO on Toronto) carried no price at all. But a
+symbol is not an identity: searching a private group's name answers with symbols
+belonging to unrelated businesses (measured, "YKK" matched two Finnish companies).
+A candidate is accepted only when its registered name matches at the same bar the
+legal-entity registry uses, so an unmatched company has no price rather than
+somebody else's.
+
 The remaining publications are ranked: filings and newswires (`primary`), the
 company's own national press (`national`), international wires (`global`), then
 every other real publication (`fallback`, read last and labelled). The ranking
@@ -506,6 +531,7 @@ BriefCortex/
 | `services/number_check.py` | Deterministic figure check: every number a claim states must appear somewhere in the evidence |
 | `services/report_order.py` | Key events first, then newest — the reading order of `news` |
 | `services/market_data.py` | Timestamped market quote for a listed company, fetched separately from the news |
+| `services/ticker.py` | Resolves a company name to its exchange symbol, and refuses to guess when the name matches another business |
 | `services/forward_looking.py` | Separates stated intent from reported events so a promise never becomes evidence |
 | `services/gateway_plugin.py` | Briefing-shaped gateway decision: one `GatewayDecision` per request |
 | `services/conflict_detection.py` | Deterministic in-report conflict lane, on the shared rule table |
@@ -593,7 +619,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 473 passed.
+Expected: 517 passed.
 
 The gateway policy package ships its own suite, runnable without this backend:
 

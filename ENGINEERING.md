@@ -220,14 +220,58 @@ board index is crawled for per-platform link shapes:
 Measured against the multi-publisher path on the same query, LinkedIn returned
 587 attributable role titles versus 106, which is why it runs as its own lane.
 
+#### An employer's board is not a job board
+
+Workday, Lever, Greenhouse, iCIMS, SmartRecruiters and similar hosts read like
+aggregators but are the employer's own board reached through a vendor front end.
+They are refused-host **exempt** and recognised as careers pages
+(`hiring.is_careers_url`). Getting this wrong is costly in both directions:
+measured, `canadagoose.wd3.myworkdayjobs.com` was on the refused list, so a brief
+reported `hiring=0` while that same board listed **96 roles**.
+
+Workday boards are read from the vendor's JSON listing, not its HTML: the page is
+a shell (measured: 7,446 bytes, zero `JobPosting` blocks) while
+`POST /wday/cxs/{tenant}/{site}/jobs` answered with all 96. The endpoint needs the
+tenant twice (subdomain and lowercased path segment) plus the site name; a locale
+prefix (`/en-US/CanadaGooseCareers`) belongs to neither.
+
+#### Probing the company's own careers page
+
+A careers page is the one hiring source that does not depend on a search engine
+ranking it. Only what Tavily returned was ever read, so a company whose board does
+not surface for its own name had no hiring lane at all. When the hiring lane comes
+back empty, `ingestion._probe_own_careers` tries the shapes a company careers URL
+actually takes (`/careers`, `/en-us/pages/careers`, `/pages/careers`,
+`/about/careers`, `careers.<domain>`), taking the domain from hosts already in
+the result set and stopping at the first board that answers.
+
+Measured on Canada Goose: `/careers` returned 404, `/en-us/pages/careers` returned
+a Shopify page linking two absolute Workday URLs, and following that link produced
+10 roles (96 on the board).
+
 ### 3.7 Market quote
 
-`services/market_data.py`. Yahoo Finance chart endpoint, no key. Exchange suffixes
-are tried in order, because a bare ticker for a non-US listing returns 404
-(measured: `ZYDUSLIFE` → `.NS` → 1,197.90 INR). A quote is stored as its own
-`FactBase.quote`, never in `hard_facts`: it is a market number, not reporting, and
-it changes by the hour. No ticker means no quote — a private company is not
-guessed.
+`services/market_data.py`, `services/ticker.py`. Yahoo Finance chart endpoint, no
+key. Exchange suffixes are tried in order, because a bare ticker for a non-US
+listing returns 404 (measured: `ZYDUSLIFE` → `.NS` → 1,197.90 INR). A quote is
+stored as its own `FactBase.quote`, never in `hard_facts`: it is a market number,
+not reporting, and it changes by the hour.
+
+The quote used to require the caller to supply a ticker, which meant a brief on a
+listed company usually had no price at all — measured, five stored briefs for
+Canada Goose (GOOS on NYSE, GOOS.TO on Toronto) carried none. The symbol is now
+resolved from the company name through Yahoo's search endpoint (no key, no model
+call), at the cost of one extra request per brief.
+
+A symbol is not an identity, so a candidate is accepted only when its registered
+name matches at the same bar the legal-entity registry uses
+(`company_identity._name_similarity`, 0.72). Searching a private group's name
+answers with symbols belonging to unrelated businesses — measured, "YKK" matched
+`YKK.SG` (Yleiselektroniikka Oyj) and `YKK.F` (Boreo Oyj), two Finnish companies.
+Non-equity quote types are dropped too: a currency pair (`NIO=X`), a tokenised
+derivative (`SNDK-USD`) and an ETF tracking the stock (`SNDK.TO`) all answer the
+same search and none of them is the share price. An unmatched company therefore
+has **no quote**, rather than somebody else's.
 
 ### 3.8 Our own company
 
@@ -388,7 +432,7 @@ machine that has only psycopg2.
 
 ## 11. Testing
 
-`backend/tests/`, 473 tests, plus `bifrost-cache-policy/tests/`, 74. What they are
+`backend/tests/`, 517 tests, plus `bifrost-cache-policy/tests/`, 74. What they are
 for:
 
 - **Live-run regressions, not invented cases.** Every hiring-filter test uses a

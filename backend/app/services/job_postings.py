@@ -288,11 +288,28 @@ def _detail_links(page_html: str, base_url: str, limit: int) -> List[str]:
 def postings_from_url(url: str) -> List[JobPosting]:
     """Fetch a careers page and return the openings it publishes.
 
-    An index page on a JavaScript board carries no JobPosting block, but it does
-    link to detail pages that do. When the index yields nothing, a few detail
-    pages are opened instead, which is how the company's openings were recovered
-    on careers.amd.com.
+    Three shapes are handled, in the order that avoids wasted requests:
+
+    1. **The URL is itself a vendor board** — Workday answers its own JSON listing,
+       which carries every opening. This runs before any page fetch because the
+       board's HTML is a shell (measured: 7,446 bytes, zero postings) while the
+       listing returned all 96.
+    2. **The page carries schema.org `JobPosting` markup** — read directly.
+    3. **The page delegates to a vendor board** — an employer's own careers page
+       frequently links out to Workday rather than listing roles itself (measured:
+       two Workday URLs, no roles of its own). The board behind that link is read
+       instead, which is how 96 roles were recovered from a page that showed none.
+
+    Small boards that publish role titles as plain text fall through to the prose
+    reader in `hiring._collect_posting`, which the caller runs when this returns
+    nothing.
     """
+    workday = _workday_cx_endpoint(url)
+    if workday:
+        postings = _postings_from_workday(workday)
+        if postings:
+            return postings
+
     page_html = fetch_page(url)
     if not page_html:
         return []
@@ -301,6 +318,19 @@ def postings_from_url(url: str) -> List[JobPosting]:
     if postings:
         logger.info("Careers page read | url=%s | postings=%s", url, len(postings))
         return postings
+
+    boards = _board_links(page_html)
+    for board_url in boards:
+        cx = _workday_cx_endpoint(board_url)
+        if not cx:
+            continue
+        postings = _postings_from_workday(cx)
+        if postings:
+            logger.info(
+                "Careers page delegates to a board | page=%s | board=%s | postings=%s",
+                url, board_url, len(postings),
+            )
+            return postings
 
     details = _detail_links(page_html, url, MAX_DETAIL_FETCHES)
     recovered: List[JobPosting] = []
@@ -316,10 +346,144 @@ def postings_from_url(url: str) -> List[JobPosting]:
             recovered.append(posting)
 
     logger.info(
-        "Careers page read | url=%s | postings=%s | detail_pages=%s | recovered=%s",
+        "Careers page read | url=%s | postings=%s | boards=%s | detail_pages=%s "
+        "| recovered=%s",
         url,
         len(postings),
+        len(boards),
         len(details),
         len(recovered),
     )
     return recovered
+
+
+def _board_links(page_html: str) -> List[str]:
+    """Return the vendor board URLs a careers page points at."""
+    found: List[str] = []
+    for match in BOARD_LINK_RE.finditer(page_html or ""):
+        url = match.group(0).rstrip("/")
+        if url not in found:
+            found.append(url)
+        if len(found) >= MAX_BOARD_LINKS:
+            break
+    return found
+
+
+# A Workday tenant URL carries three things the listing endpoint needs:
+#   https://<tenant>.wd<N>.myworkdayjobs.com/<Site Name>/...
+_WORKDAY_RE = re.compile(
+    r"https://(?P<tenant>[a-z0-9\-]+)\.(?:wd\d+\.)?myworkdayjobs\.com/"
+    r"(?:wday/cxs/[^/]+/)?(?P<site>[^/?#]+)(?:/(?P<path>.*))?",
+    re.IGNORECASE,
+)
+
+# An employer's own careers page often delegates to a vendor board rather than
+# listing roles itself: measured, canadagoose.com/en-us/pages/careers is a Shopify
+# page whose only job links are two absolute Workday URLs. Finding the board the
+# page points at is what turns "this page lists nothing" into 96 roles.
+BOARD_LINK_RE = re.compile(
+    r"https://[a-z0-9\-]+\.(?:wd\d+\.)?myworkdayjobs\.com/[^\"'\s<>]+",
+    re.IGNORECASE,
+)
+
+# How many board links to follow from one index page. A page links several times
+# to the same board (header, footer, body), so duplicates are collapsed first.
+MAX_BOARD_LINKS = 2
+
+# Workday's listing endpoint answers a POST with a JSON body. One page of twenty
+# is enough to characterise the boards a brief cares about; the whole list is not
+# needed to say where a company is putting people.
+WORKDAY_PAGE_SIZE = 20
+
+
+# Workday sits locale prefixes in front of the site name:
+#   /CanadaGooseCareers
+#   /en-US/CanadaGooseCareers
+# The listing endpoint wants the site name, so a leading locale segment is skipped.
+_WORKDAY_LOCALE_RE = re.compile(r"^[a-z]{2}-[A-Z]{2}/")
+
+
+def _workday_cx_endpoint(url: str) -> Optional[str]:
+    """Return Workday's JSON listing URL for a careers URL, or None.
+
+    The tenant is the subdomain, the site is the first path segment after an
+    optional locale ("CanadaGooseCareers"), and the tenant is repeated lowercased
+    in the CX path — that triple is what the site's own front-end calls, and
+    getting one of them wrong returns 404 or 502 rather than an empty list.
+    """
+    match = _WORKDAY_RE.search((url or "").strip())
+    if not match:
+        return None
+    tenant = match.group("tenant").lower()
+    site = match.group("site")
+    path = match.group("path") or ""
+    # "/en-US/CanadaGooseCareers" parses as site=en-US, path=CanadaGooseCareers.
+    if _WORKDAY_LOCALE_RE.match(f"{site}/"):
+        site = path.split("/")[0] if path else site
+        if not site:
+            return None
+    return (
+        f"https://{match.group('tenant')}.{_workday_host_suffix(url)}"
+        f"/wday/cxs/{tenant}/{site}/jobs"
+    )
+
+
+def _workday_host_suffix(url: str) -> str:
+    """Return the Workday host part after the tenant subdomain."""
+    match = re.search(
+        r"https?://[a-z0-9\-]+\.([a-z0-9.\-]+myworkdayjobs\.com)", url or "", re.I
+    )
+    return match.group(1).lower() if match else "myworkdayjobs.com"
+
+
+def _postings_from_workday(endpoint: str) -> List[JobPosting]:
+    """Read a Workday board's openings from its own JSON listing."""
+    body = json.dumps(
+        {"appliedFacets": {}, "limit": WORKDAY_PAGE_SIZE, "offset": 0}
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except Exception as exc:
+        logger.info("Workday listing unreadable | url=%s | %s", endpoint, exc)
+        return []
+
+    if not isinstance(payload, dict):
+        return []
+
+    rows = payload.get("jobPostings") or []
+    postings: List[JobPosting] = []
+    for row in rows[:MAX_POSTINGS_PER_PAGE]:
+        if not isinstance(row, dict):
+            continue
+        title = " ".join(str(row.get("title") or "").split())
+        if not title:
+            continue
+        postings.append(
+            JobPosting(
+                title=title,
+                description="",
+                location=" ".join(str(row.get("locationsText") or "").split()) or None,
+                employment_type=None,
+                posted_date=None,
+            )
+        )
+
+    if postings:
+        logger.info(
+            "Workday board read | url=%s | total=%s | read=%s",
+            endpoint,
+            payload.get("total"),
+            len(postings),
+        )
+    return postings

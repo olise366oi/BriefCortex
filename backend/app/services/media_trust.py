@@ -73,10 +73,17 @@ REFUSED_HOSTS: Tuple[str, ...] = (
     # Job-board aggregators that are not the company's own careers page. A
     # Canadian run filed seven roles from one of these into the hard-fact lane,
     # because the page is prose-shaped and not on this list.
+    #
+    # Applicant-tracking systems are **not** on this list even though they read
+    # like job boards. `canadagoose.wd3.myworkdayjobs.com` is Canada Goose's own
+    # careers site — the company's openings, published by the company, reached
+    # through a vendor's front end. Refusing it deleted the hiring lane for every
+    # employer that uses Workday, which is most large ones: measured, a brief for
+    # Canada Goose reported hiring=0 while its own board listed 96 roles. The
+    # vendor host is read as a careers page (`is_careers_url`) and its listings
+    # come from the vendor's JSON endpoint, never from reporter prose.
     "eluta.ca", "jobzmall.com", "talent.com", "neuvoo.com", "jooble.org",
     "workopolis.com", "careerjet.ca", "ca.indeed.com", "jobs.ca",
-    "smartrecruiters.com", "lever.co", "greenhouse.io", "workday.com",
-    "myworkdayjobs.com", "icims.com",
     # Paid company-profile databases: the visible page is a sales pitch, and
     # "Gain a 360-degree view … Learn more" was reaching the fact base.
     "globaldata.com", "dnb.com", "bisnode.com", "moodys.com",
