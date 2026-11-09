@@ -30,6 +30,7 @@ from app.models.briefing import BriefingReport, ClaimModule
 from app.models.fact_base import FactBase
 from app.services.llm_client import build_client
 from app.services.logger_service import get_logger
+from app.services.number_check import unsupported_numbers
 
 logger = get_logger("report_audit")
 
@@ -88,7 +89,6 @@ class AuditOutcome:
 
     accepted: int = 0
     removed: List[Dict[str, str]] = field(default_factory=list)
-    summary_rejected: bool = False
 
     @property
     def total_removed(self) -> int:
@@ -289,10 +289,42 @@ async def audit_report(
                 "remedy": f"source not present in the evidence set ({section})",
             }
 
+    # Second deterministic pass: a figure the evidence never states. This is the
+    # fabrication the model audit was catching only some of the time, and it
+    # costs nothing. A number missing from the *cited* source is not flagged —
+    # only one missing from the whole evidence set, so a claim that consolidates
+    # several facts stays intact.
+    invented: Dict[int, Dict[str, str]] = {}
+    evidence_texts = [
+        item.content
+        for item in list(fact_base.hard_facts) + list(fact_base.hiring)
+        + list(fact_base.analyst_opinions)
+    ]
+    for position, (section, _index, claim) in enumerate(claims):
+        if position in unfunded:
+            continue
+        missing = unsupported_numbers(claim.claim, evidence_texts)
+        if not missing:
+            continue
+        invented[position] = {
+            "verdict": "unsupported_figure",
+            "remedy": (
+                "these figures appear nowhere in the evidence: "
+                + ", ".join(missing[:6])
+            ),
+        }
+        logger.info(
+            "Figure not in evidence | section=%s | figures=%s | claim=%s",
+            section,
+            missing[:6],
+            claim.claim[:90],
+        )
+
     model_failures = await _audit_claims(
         claims, company, description, _evidence_text(fact_base), fact_base
     )
     model_failures.update({k: v for k, v in unfunded.items() if k not in model_failures})
+    model_failures.update({k: v for k, v in invented.items() if k not in model_failures})
 
     for position in sorted(model_failures):
         if position >= len(claims):
@@ -312,12 +344,18 @@ async def audit_report(
     outcome.accepted = len(claims) - len(outcome.removed)
     audited = _apply(report, set(model_failures))
 
+    # The three passes are reported separately: which one removed a claim says
+    # whether a rule fired or a model judged, and they need different follow-up.
     logger.info(
-        "Report audited | company=%r | claims=%s | accepted=%s | removed=%s",
+        "Report audited | company=%r | claims=%s | accepted=%s | removed=%s "
+        "| unknown_source=%s | invented_figure=%s | model=%s",
         company,
         len(claims),
         outcome.accepted,
         outcome.total_removed,
+        len(unfunded),
+        len(invented),
+        len(model_failures) - len(unfunded | invented),
     )
     for entry in outcome.removed:
         logger.info(

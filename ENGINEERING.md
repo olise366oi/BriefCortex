@@ -241,17 +241,32 @@ room do we have" is part of what the evidence amounts to.
 
 ## 6. Pre-delivery audit
 
-`services/report_audit.py`. Two checks per claim:
+`services/report_audit.py`. Three passes per claim, in this order — the first two
+cost no model call:
 
-- **Subject** — is this about the company being briefed? Judged against the
-  evidence sentence **that claim's own source** stated, not against a sampled
-  digest. Measured: judged against a truncated digest, a correct claim is rejected
-  for lack of support purely because its sentence was not in the visible slice.
-- **Support** — does that sentence actually state what the claim states?
+1. **Unknown source** (deterministic). A claim whose `source_url` is not in the
+   evidence set cannot be sourced, whatever the model said.
+2. **Unsupported figure** (deterministic, `services/number_check.py`). A figure
+   the claim states that **no** evidence fact contains is fabricated. Measured:
+   a live brief carried invented figures next to true ones.
+3. **Subject and support** (model). Is this about the company being briefed, and
+   does the sentence its own source stated actually say what the claim says?
 
 A failing claim is **removed**, not caveated: a caveat still puts the sentence in
-front of the reader. Removals are listed in `removed_claims` so the brief does not
-look cleaner than the evidence allows.
+front of the reader. Removals are listed in `removed_claims` with the source URL,
+so the brief does not look cleaner than the evidence allows and an over-strict
+audit can be re-checked afterwards.
+
+**Why the figure check is one-sided.** It flags a figure only when it appears
+nowhere in the evidence — never when it is absent from the *cited* source. A
+claim that consolidates several facts states figures from all of them, and
+judging those against one article is the bug that once emptied a correct brief
+(7 of 11 claims removed while every figure was present in the evidence set). Its
+job is fabrication; misattribution stays the model pass's job.
+
+The check reads claims only (`news`, `hires`). `executive_summary.recommendation`
+is a proposal — "seek a price reduction of 3–5%" names a figure no evidence should
+contain, and that is the point of a recommendation.
 
 ## 7. Ordering
 
@@ -334,7 +349,7 @@ machine that has only psycopg2.
 
 ## 11. Testing
 
-`backend/tests/`, 442 tests, plus `bifrost-cache-policy/tests/`, 74. What they are
+`backend/tests/`, 454 tests, plus `bifrost-cache-policy/tests/`, 74. What they are
 for:
 
 - **Live-run regressions, not invented cases.** Every hiring-filter test uses a

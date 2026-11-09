@@ -341,6 +341,14 @@ caller's own **profile** reaches only the recommendation; our own **market
 position** reaches the analysis, because "how much room do we have" is part of
 what the evidence amounts to.
 
+**Three passes, two of them free.** An unknown source and a figure the evidence
+never states are caught by string comparison before any model is asked; only the
+subject/support judgement costs a call. The figure check is deliberately
+one-sided — it flags a number that appears **nowhere** in the evidence, never one
+missing from the single cited article — because a claim that consolidates several
+facts legitimately quotes figures from all of them, and judging those against one
+article is what once emptied a correct brief.
+
 What the analysis does with our own position is state how it bears on *this*
 counterparty — a weak share price reduces our room to walk away or hold out. It is
 never written as "they think we are weak": nobody in the evidence said that.
@@ -467,7 +475,8 @@ BriefCortex/
 | `services/evidence_fingerprint.py` | Evidence-set fingerprint, so a brief is reused when the facts match |
 | `services/cache_invalidation.py` | Cross-set contradiction check that invalidates a reusable brief |
 | `services/analysis.py` | LLM report generation, prompt assembly, audit and ordering |
-| `services/report_audit.py` | Pre-delivery check: a claim about another company, or unsupported, is removed |
+| `services/report_audit.py` | Pre-delivery check: a claim about another company, an unknown source, or a figure the evidence never states, is removed |
+| `services/number_check.py` | Deterministic figure check: every number a claim states must appear somewhere in the evidence |
 | `services/report_order.py` | Key events first, then newest — the reading order of `news` |
 | `services/market_data.py` | Timestamped market quote for a listed company, fetched separately from the news |
 | `services/forward_looking.py` | Separates stated intent from reported events so a promise never becomes evidence |
@@ -557,7 +566,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 442 passed.
+Expected: 454 passed.
 
 The gateway policy package ships its own suite, runnable without this backend:
 
