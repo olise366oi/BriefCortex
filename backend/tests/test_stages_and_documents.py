@@ -55,7 +55,13 @@ def _fact_base(facts: list[str]) -> FactBase:
 # --- stage schemas -------------------------------------------------------
 
 def test_each_stage_has_its_own_shape():
-    assert list(FindingsStage.model_fields.keys()) == ["news", "hires"]
+    # The findings stage also carries changes_since_previous, because a revision
+    # has to be able to state where its reading differs from the earlier one.
+    assert list(FindingsStage.model_fields.keys()) == [
+        "news",
+        "hires",
+        "changes_since_previous",
+    ]
     assert list(AnalysisStage.model_fields.keys()) == ["analysis"]
     assert list(RecommendationStage.model_fields.keys()) == ["executive_summary"]
 

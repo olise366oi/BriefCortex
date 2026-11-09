@@ -32,14 +32,14 @@ Given `{company, meeting_purpose}`, BriefCortex produces a structured `BriefingR
 
 - **Both sides are read**: the counterparty through the full pipeline, the caller's own company through its market position (quote plus the coverage that moved it).
 - **Three-stage generation with the audit in between**: findings, then audit, then analysis, then recommendation. A claim the audit removed cannot reach the reasoning behind the advice.
-- **Per-publisher scoping**: 13 domains each get their own path and body-boundary rules, so navigation trees, related-article blocks and paywalls never become facts.
+- **Per-publisher scoping**: 5 categories covering 17 domains, each with its own path and body-boundary rules, so navigation trees, related-article blocks and paywalls never become facts.
 - **30-day counterparty freshness, 60-day own-company baseline**: both the publication date and the reporting period inside each sentence are checked.
 - **Hard facts first**: facts are what the model may turn into leverage; unverified commentary, job postings and forward-looking statements sit in their own lanes with their own rules.
 - **A dated timeline**: every claim carries its date, reports of one event over weeks consolidate into one claim with a stated span, and key events lead.
 - **Long documents are read selectively**: a 10-K is segmented, scored against the objective and kept to the sections that answer it.
 - **Recommendation with numeric asks**, derived from the assessment — or a directional read when no objective was supplied.
 - **A deterministic conflict-detection lane** that flags contradictory facts with both sources attached — and is *never* fed into the LLM.
-- **Three cache layers** keyed on request, on evidence, and on cross-set contradiction, so a brief is reused when the facts match and invalidated when newer facts overturn it.
+- **Three cache layers, plus the gateway** keyed on request, on evidence, and on cross-set contradiction — and a content-aware TTL sent to the gateway — so a brief is reused when the facts match and invalidated when newer facts overturn it.
 - **A coverage ledger** that reports what retrieval actually reached — and, when it reached almost nothing, says so instead of letting an empty result read as a clean one.
 
 For the build-level detail of each of these — stage contracts, audit rules, measured
@@ -51,56 +51,107 @@ thresholds, per-platform link shapes — see **[ENGINEERING.md](ENGINEERING.md)*
 
 <!-- ARCH_DIAGRAM -->
 
-End-to-end data flow: the UI, the async job that owns the request, the retrieval and cleaning layer, and the structured LLM output.
+End-to-end data flow. Four cache decisions sit on this path, retrieval is four
+concurrent lanes rather than one query, and generation is three stages with the
+audit between them.
 
 ```mermaid
 graph TD
-    %% ---------- Frontend & API ----------
-    UI[Frontend UI] -->|Input: Company + Time + Purpose| API[FastAPI]
+    %% ---------- Entry ----------
+    UI[Frontend UI] -->|company + meeting time + objective| API[FastAPI]
+    API --> Record[(briefings row, status=pending)]
 
-    %% ---------- Job control ----------
-    subgraph CONTROL["Job Control"]
-        API --> Record[(briefings row, status=pending)]
-        Record --> Job[Async job]
-        Job --> CheckBrief{"Exact-request cache"}
-        CheckBrief -- Hit --> ReturnCache[Return cached brief]
-        CheckBrief -- Miss --> FullSearch[Search last 30 days]
+    %% ---------- Cache layer 1: same request? ----------
+    API --> L1{"L1 request cache<br/>company + objective + meeting day"}
+    L1 -- hit, and facts on file<br/>do not contradict it --> Serve[Return stored brief]
+    L1 -- miss, or contradicted --> Window
+
+    %% ---------- Window: what period is missing? ----------
+    Record --> Window["Meeting-anchored window<br/>30 days ending at the meeting<br/>minus coverage watermark"]
+    Window -- "nothing to fetch" --> Reuse[(Reuse stored evidence)]
+    Window -- "fetch the increment" --> Lanes
+
+    %% ---------- Retrieval: four lanes, concurrently ----------
+    subgraph RETRIEVE["Retrieval — asyncio.gather"]
+        Lanes["Lane 1: registry news<br/>dated, publisher-scoped"]
+        Lanes2["Lane 2: open domain<br/>regulator, careers. Undated"]
+        Lanes3["Lane 3: LinkedIn jobs<br/>undated"]
+        Lanes4["Lane 4: local language<br/>national press only"]
+        Lanes --> Tavily[Tavily API]
+        Lanes2 --> Tavily
+        Lanes3 --> Tavily
+        Lanes4 --> Tavily
+        Tavily -- "network error" --> Retry["Tenacity: retry"]
+        Retry --> Tavily
     end
 
-    %% ---------- Retrieval & cleaning ----------
-    subgraph RETRIEVE["Retrieval & Cleaning"]
-        FullSearch --> Planner["Model search plan, categories from registry"]
-        Planner --> Tavily[Tavily Search API]
+    %% ---------- Cleaning ----------
+    Tavily --> Refuse{"Host refused?<br/>forum, job board,<br/>wildlife, law-firm ad"}
+    Refuse -- yes --> Drop[Discard]
+    Refuse -- no --> Scope["Per-publisher scoping<br/>body boundaries, trafilatura"]
+    Scope --> Gate["Quality gate:<br/>table rows, vendor copy,<br/>filing boilerplate"]
+    Gate --> Dated["Publish date, URL-slug<br/>and page fallback"]
+    Dated --> Window2["Window filter<br/>+ reporting-period check"]
+    Window2 --> Order["Trust order:<br/>primary > national > global > fallback"]
+    Order --> Route["Route by subject:<br/>whose article is this?"]
 
-        Tavily -- Network Error --> Tenacity["Tenacity: retry"]
-        Tenacity --> Tavily
+    %% ---------- Fact base ----------
+    Route --> FactBase[(FactBase<br/>hard_facts · analyst_opinions · hiring<br/>quote · conflicts · incidental_facts<br/>forward_looking · coverage · id)]
+    Reuse --> FactBase
 
-        Tavily -- Success --> Scope["Per-publisher scoping, section + body rules"]
-        Scope --> Extract["Trafilatura, opening/closing split"]
-        Extract --> FactBase[(FactBase, hard facts only)]
+    %% ---------- Cache layer 2: same brief? ----------
+    FactBase --> L2{"L2 evidence fingerprint<br/>facts + postings + objective<br/>+ description + own profile"}
+    L2 -- hit --> Invalidate{"L3 cross-set check:<br/>do newer facts<br/>overturn it?"}
+    Invalidate -- reusable --> Serve
+    Invalidate -- contradicted --> Stages
+    L2 -- miss --> Stages
+
+    %% ---------- Inference: three stages, audit between ----------
+    subgraph INFER["Generation"]
+        Stages["1 · findings<br/>read evidence, write news + hires"]
+        Audit["audit<br/>unsupported claim removed"]
+        Analysis["2 · analysis<br/>read audited findings + quote<br/>+ our own market position"]
+        Recommend["3 · recommendation<br/>read assessment + our profile"]
+        Stages --> Audit
+        Audit --> Analysis
+        Analysis --> Recommend
     end
 
-    %% ---------- Inference ----------
-    subgraph INFER["Inference"]
-        FactBase --> Headers["Content-aware headers, cache key + TTL"]
-        Headers --> LLM["OpenAI-compatible model"]
-        LLM -->|JSON| Validate["Pydantic validation"]
-        Validate -- Failure --> RetryLLM["Feed error back, retry"]
-        RetryLLM --> LLM
-        Validate -- Success --> SaveBrief[(Briefing report, JSONB)]
-    end
+    %% ---------- Gateway ----------
+    Recommend --> Headers["Cache headers:<br/>x-bf-cache-key, x-bf-cache-ttl,<br/>x-bf-content-class"]
+    Analysis --> Headers
+    Stages --> Headers
+    Headers --> Bifrost{"Bifrost gateway<br/>semantic_cache, dimension 1"}
+    Bifrost -- "cache hit" --> Replay[Replay response]
+    Bifrost -- "miss" --> LLM["OpenAI-compatible model"]
+    LLM -->|JSON| Validate{"Pydantic stage schema"}
+    Validate -- failure --> Feedback["Feed the error back, retry"]
+    Feedback --> LLM
+    Validate -- success --> Save[(BriefingReport + evidence<br/>+ fingerprint, JSONB)]
 
-    SaveBrief --> API
+    Save --> API
+    Save --> L1
 
-    %% ---------- Styling ----------
+    %% ---------- Housekeeping ----------
+    Sched["Daily retention loop"] --> Retention["Evidence expiry,<br/>URL decay"]
+
     classDef edgeNode fill:#1f2937,stroke:#111827,stroke-width:2px,color:#ffffff
+    classDef cacheNode fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
     classDef layerNode fill:#f3f4f6,stroke:#9ca3af,stroke-width:1px,color:#111827
     classDef storeNode fill:#ecfdf5,stroke:#10b981,stroke-width:2px,color:#065f46
+    classDef dropNode fill:#fee2e2,stroke:#dc2626,stroke-width:1px,color:#7f1d1d
 
     class API,UI edgeNode
-    class Job,CheckBrief,ReturnCache,FullSearch,Planner,Tavily,Tenacity,Scope,Extract,Headers,LLM,Validate,RetryLLM layerNode
-    class Record,FactBase,SaveBrief storeNode
+    class L1,L2,Invalidate,Bifrost,Headers cacheNode
+    class Window,Lanes,Lanes2,Lanes3,Lanes4,Tavily,Retry,Scope,Gate,Dated,Window2,Order,Route,Stages,Audit,Analysis,Recommend,Replay,Feedback,LLM,Validate,Refuse,Sched,Retention layerNode
+    class Record,Reuse,FactBase,Save storeNode
+    class Drop dropNode
 ```
+
+Read left to right: the request either stops at a cache decision or walks the
+retrieval path once for the days it has not yet covered. Nothing about the
+evidence is re-fetched that is already stored, and no claim reaches the
+recommendation without passing the audit.
 
 *(The diagram is the canonical one; the module map and design decisions below carry the detail.)*
 
@@ -143,8 +194,8 @@ published here, because "trusted" has to be checkable rather than claimed:
 | `auto_industry` | `autonews.gasgoo.com`, `cnevpost.com`, `insideevs.com`, `electrek.co` |
 | `official_primary` | `sec.gov`, `prnewswire.com`, `globenewswire.com`, `businesswire.com` |
 
-The model chooses *categories*, never domains, so a fabricated host cannot reach
-the search API.
+17 domains across 5 categories. The model chooses *categories*, never domains, so
+a fabricated host cannot reach the search API.
 
 **The company's own country decides its press.** A company is covered where it
 lives: YKK is Japanese, and the international wire list returns a decade of US
@@ -256,22 +307,29 @@ first, then newest.
 Its output is **never** fed into the prompt: semantics cannot override evidence,
 and evidence cannot be reinterpreted by semantics.
 
-### 7. Cache: Three Different Questions
+### 7. Cache: Three Different Questions, and a Fourth Answer
 
 | Layer | Key | Question |
 |---|---|---|
 | exact request | company + objective + **meeting day** | same request? |
 | evidence fingerprint | facts + postings + objective + description + own profile | same brief? |
 | invalidation | cross-set contradiction | may it still be served? |
+| gateway (`semantic_cache`) | this request's `x-bf-cache-key`, TTL from the evidence | may the *model call* be replayed? |
 
-The middle layer exists because the request layer missed whenever a meeting moved
-by a day, even though nothing about the company changed. The third exists because
-a fingerprint cannot see a contradiction: a brief written while the company was
-hiring is wrong the moment a layoff is reported, and each individual fact in it
-was still correct.
+The first three decide whether a **brief** may be reused; the fourth decides
+whether an **HTTP request** may be. They are independent: the gateway can replay a
+stage call, and the pipeline can serve a stored brief without any model call at
+all.
+
+The fingerprint layer exists because the request layer missed whenever a meeting
+moved by a day, even though nothing about the company changed. The invalidation
+layer exists because a fingerprint cannot see a contradiction: a brief written
+while the company was hiring is wrong the moment a layoff is reported, and each
+individual fact in it was still correct.
 
 Content-aware TTL travels as headers (`x-bf-cache-key`, `x-bf-cache-ttl`,
-`x-bf-content-class`), classified by word-boundary matching on the fact texts:
+`x-bf-content-class`), classified by word-boundary matching on the fact texts, and
+attached to **every** stage call:
 
 | Class | Signals | TTL |
 |---|---|---|
@@ -290,7 +348,7 @@ and the gateway stores, serves and expires them. Verified against a stock
 `x-bifrost-cache-hit=false`, identical second request `true`, refreshed evidence
 `false` again.
 
-### 7. Tested, Not Vibes
+### 8. Tested, Not Vibes
 
 The repo ships with `pytest` coverage for the prompt/schema contract, the conflict engine, the extraction rules and the cache classifier, including:
 
@@ -449,7 +507,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 386 passed.
+Expected: 420 passed.
 
 The gateway policy package ships its own suite, runnable without this backend:
 

@@ -289,7 +289,7 @@ machine that has only psycopg2.
 
 ## 11. Testing
 
-`backend/tests/`, 386 tests, plus `bifrost-cache-policy/tests/`, 70. What they are
+`backend/tests/`, 420 tests, plus `bifrost-cache-policy/tests/`, 74. What they are
 for:
 
 - **Live-run regressions, not invented cases.** Every hiring-filter test uses a

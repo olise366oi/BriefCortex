@@ -29,7 +29,14 @@ from typing import List, Optional, Sequence
 
 from pydantic import BaseModel, Field
 
-from app.models.briefing import Analysis, Claim, ClaimModule, ExecutiveSummary
+from app.models.briefing import (
+    Analysis,
+    BriefingReport,
+    Claim,
+    ClaimModule,
+    ExecutiveSummary,
+    RevisionNote,
+)
 from app.models.fact_base import FactBase
 from app.services.logger_service import get_logger
 
@@ -73,10 +80,35 @@ ATTRIBUTION — never let one company's reporting become another's finding:
 Never invent a source. Every claim carries a real source_url taken from the input,
 including scheme. Never fabricate a URL, date or number.
 
+REVISION — when the input carries a <PREVIOUS_FINDINGS> block, this is a later
+brief for the same company:
+- Those earlier findings are NOT evidence. They carry no source authority and you
+  must not cite them or copy their source URLs. They exist so this brief keeps
+  what the earlier run established rather than losing it.
+- Read the current evidence first and form your own list. Then include the earlier
+  findings that the evidence still supports, and add the new ones. Do not carry an
+  earlier finding forward merely because it was stated.
+- A <PREVIOUS_JUDGEMENT_NOT_FOR_THIS_BRIEF> block, when present, is the previous
+  assessment and recommendation. Never reuse it: a later stage writes the
+  assessment from scratch. It is there only so you can see what the earlier
+  reading concluded.
+- Emit "changes_since_previous" ({"change": str, "why": str}) describing where your
+  reading differs from that judgement: a direction that reversed, a judgement that
+  strengthened, weakened or was withdrawn. Each "why" must name the evidence that
+  caused the change. Do not list newly arrived facts as a change — a change is a
+  difference in the reading, not new material. If nothing material changed, emit
+  an empty list.
+
+FIRST BRIEF — with no <PREVIOUS_FINDINGS> block there is nothing to differ from,
+so "changes_since_previous" must be omitted entirely. Never emit it as an empty
+list and never write a placeholder into it: a first brief that announces "no
+changes" is describing a comparison that never happened.
+
 Reply with JSON only:
 {"news": {"items": [{"claim": str, "source_url": str, "date": str,
 "first_seen": str, "key_event": bool}]},
- "hires": {"items": [{"claim": str, "source_url": str, "date": str}]}}"""
+ "hires": {"items": [{"claim": str, "source_url": str, "date": str}]},
+ "changes_since_previous": [{"change": str, "why": str}]}"""
 
 
 ANALYSIS_PROMPT = """You assess a company from what has already been established.
@@ -156,6 +188,10 @@ Reply with JSON only:
 class FindingsStage(BaseModel):
     news: ClaimModule = Field(default_factory=ClaimModule)
     hires: ClaimModule = Field(default_factory=ClaimModule)
+    # Present only on a revision: the schema carries it so a later brief can state
+    # where its reading differs. A first brief never emits it, and the caller
+    # discards it if the reply claims a comparison that had no basis.
+    changes_since_previous: List[RevisionNote] = Field(default_factory=list)
 
 
 class AnalysisStage(BaseModel):
@@ -174,8 +210,17 @@ def render_findings_input(
     fact_base: FactBase,
     meeting_purpose: str,
     company: str,
+    previous_block: str = "",
 ) -> str:
-    """The evidence block for the findings stage."""
+    """The evidence block for the findings stage.
+
+    ``previous_block`` is the earlier brief for this company, rendered by
+    ``render_previous_reading``. It reaches this stage and no other: the findings
+    are what a revision extends, so the comparison belongs where the findings are
+    re-read. The assessment and recommendation write themselves from scratch in
+    stages 2 and 3, so passing the old judgement any further would let it anchor
+    the new reading.
+    """
     lines: List[str] = []
     if company:
         lines.append(f"COMPANY BEING BRIEFED: {company}")
@@ -211,6 +256,56 @@ def render_findings_input(
     if coverage.lanes_missing:
         lines.append(f"lanes that returned nothing: {', '.join(coverage.lanes_missing)}")
     lines.append("</COVERAGE>")
+
+    if previous_block.strip():
+        lines.append("")
+        lines.append(previous_block.strip())
+
+    return "\n".join(lines)
+
+
+def render_previous_reading(previous: Optional[BriefingReport]) -> str:
+    """Render the earlier brief as a block the model must not treat as evidence.
+
+    Only the previous *findings* are carried over — the news and hiring items —
+    so a revision can extend them instead of silently dropping what the first run
+    already established. The previous assessment and recommendation are kept in a
+    separate block that is explicitly not to be reused, and they are passed only
+    so the model can state where its new reading differs.
+
+    A first brief returns an empty string, so the caller can tell "no previous
+    brief" from "a previous brief that found nothing".
+    """
+    if previous is None:
+        return ""
+
+    lines = ["<PREVIOUS_FINDINGS>"]
+    for label, module in (("news", previous.news), ("hires", previous.hires)):
+        claims = [item.claim for item in module.items]
+        if claims:
+            lines.append(f"{label}: " + " | ".join(claims))
+    lines.append(
+        "These are what the EARLIER brief reported. They are not evidence, they "
+        "have no source authority, and you must not cite them. They are here so "
+        "this brief can include and extend them rather than lose them."
+    )
+    lines.append("</PREVIOUS_FINDINGS>")
+
+    if previous.analysis.assessment or previous.executive_summary.recommendation:
+        lines.append("")
+        lines.append("<PREVIOUS_JUDGEMENT_NOT_FOR_THIS_BRIEF>")
+        if previous.analysis.assessment:
+            lines.append(f"assessment: {previous.analysis.assessment[:1200]}")
+        if previous.executive_summary.recommendation:
+            lines.append(
+                f"recommendation: {previous.executive_summary.recommendation[:1200]}"
+            )
+        lines.append(
+            "Do NOT reuse this judgement. Form your own reading from the evidence. "
+            "Consult this only afterwards, to state in changes_since_previous where "
+            "your new reading differs."
+        )
+        lines.append("</PREVIOUS_JUDGEMENT_NOT_FOR_THIS_BRIEF>")
 
     return "\n".join(lines)
 

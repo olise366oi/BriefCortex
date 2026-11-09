@@ -5,7 +5,7 @@ import asyncio
 from datetime import datetime, timezone
 
 from app.models.fact_base import FactBase, FactItem, IncidentalFact
-from app.services.analysis import _build_user_message, _format_fact_base_for_prompt
+from app.services.report_stages import render_findings_input
 from app.services.incidental import (
     article_subject_mentions,
     company_name_hits,
@@ -111,17 +111,20 @@ def test_incidental_facts_never_reach_the_prompt():
         )
     ]
 
-    prompt = _format_fact_base_for_prompt(
-        _fact_base(incidental_facts=incidental)
+    prompt = render_findings_input(
+        _fact_base(incidental_facts=incidental), "", "UniCredit"
     )
 
     # The sentence is not in any block the model is told to reason over.
     assert "force UniCredit to respond" not in prompt
     assert "<HARD_FACTS>" in prompt
-    assert "<ANALYST_OPINIONS>" in prompt
+    assert "<HIRING>" in prompt
 
 
-def test_user_message_also_omits_incidental_facts():
+def test_incidental_facts_never_reach_the_findings_input():
+    # A fact about us found inside an article about another company is a lead,
+    # not a finding: it travels beside the brief, never inside the evidence the
+    # model reasons over.
     incidental = [
         IncidentalFact(
             content="A move could force UniCredit to respond.",
@@ -129,7 +132,7 @@ def test_user_message_also_omits_incidental_facts():
         )
     ]
 
-    message = _build_user_message(_fact_base(incidental_facts=incidental), "")
+    message = render_findings_input(_fact_base(incidental_facts=incidental), "", "UniCredit")
 
     assert "force UniCredit to respond" not in message
 

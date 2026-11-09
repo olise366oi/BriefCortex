@@ -1,4 +1,4 @@
-"""Tests for the four behaviours added after the Instinct trial run.
+﻿"""Tests for the four behaviours added after the Instinct trial run.
 
 Each case comes from what the live run actually did wrong:
 - a caller's "none of these" verdict still produced an Indian entity
@@ -8,10 +8,16 @@ Each case comes from what the live run actually did wrong:
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from app.models.briefing import BriefingReport
-from app.services.analysis import _build_user_message, _format_previous_reading
 from app.services.company_identity import jurisdiction_from_description
 from app.services.article_subject import SUBJECT_PROMPT
+from app.services.report_stages import (
+    FINDINGS_PROMPT,
+    render_findings_input,
+    render_previous_reading,
+)
 
 
 def test_a_description_naming_a_city_yields_the_country():
@@ -53,11 +59,11 @@ def _previous_report() -> BriefingReport:
 
 
 def test_a_first_brief_carries_no_previous_reading():
-    assert _format_previous_reading(None) == ""
+    assert render_previous_reading(None) == ""
 
 
 def test_the_previous_reading_is_labelled_as_non_evidence():
-    block = _format_previous_reading(_previous_report())
+    block = render_previous_reading(_previous_report())
 
     assert block.startswith("<PREVIOUS_FINDINGS>")
     assert "</PREVIOUS_FINDINGS>" in block
@@ -68,7 +74,7 @@ def test_the_previous_reading_is_labelled_as_non_evidence():
 def test_the_previous_findings_are_carried_so_they_are_not_lost():
     # The user's requirement: the second brief must include what the first run
     # found, not replace it.
-    block = _format_previous_reading(_previous_report())
+    block = render_previous_reading(_previous_report())
 
     assert "Raised $1B at a $10B valuation." in block
 
@@ -76,7 +82,7 @@ def test_the_previous_findings_are_carried_so_they_are_not_lost():
 def test_the_previous_judgement_is_withheld_into_its_own_block():
     # Analysis and recommendation must not sit in the reading block, or the new
     # assessment is anchored to the old one.
-    block = _format_previous_reading(_previous_report())
+    block = render_previous_reading(_previous_report())
 
     assert "<PREVIOUS_JUDGEMENT_NOT_FOR_THIS_BRIEF>" in block
     assert "Do NOT reuse this judgement" in block
@@ -90,18 +96,47 @@ def test_revision_mode_is_requested_when_a_previous_brief_exists():
 
     fact_base = FactBase(
         company_id="x",
-        last_refresh_date=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+        last_refresh_date=datetime.now(timezone.utc),
         hard_facts=[],
         analyst_opinions=[],
     )
 
-    with_previous = _build_user_message(fact_base, "", _previous_report())
-    without = _build_user_message(fact_base, "", None)
+    previous = _previous_report()
 
-    assert "REVISION" in with_previous
-    assert "changes_since_previous" in with_previous
-    assert "REVISION" not in without
-    assert "<PREVIOUS_READING>" not in without
+    # The earlier brief reaches the findings stage and nowhere else: stages 2
+    # and 3 write a fresh judgement, so only the findings stage is handed the
+    # comparison it has to extend.
+    with_previous = render_findings_input(
+        fact_base, "", "X", previous_block=render_previous_reading(previous)
+    )
+    without = render_findings_input(fact_base, "", "X")
+
+    assert "<PREVIOUS_FINDINGS>" in with_previous
+    assert "<PREVIOUS_JUDGEMENT_NOT_FOR_THIS_BRIEF>" in with_previous
+    assert "not evidence" in with_previous
+    assert "<PREVIOUS_FINDINGS>" not in without
+
+
+def test_a_first_brief_renders_no_comparison_block():
+    from app.models.fact_base import FactBase
+
+    fact_base = FactBase(
+        company_id="x",
+        last_refresh_date=datetime.now(timezone.utc),
+        hard_facts=[],
+        analyst_opinions=[],
+    )
+
+    # "no previous brief" and "a previous brief that found nothing" must not
+    # render the same block.
+    assert render_previous_reading(None) == ""
+    assert "<PREVIOUS_FINDINGS>" not in render_findings_input(fact_base, "", "X")
+
+
+def test_the_findings_prompt_requires_changes_only_on_a_revision():
+    assert "changes_since_previous" in FINDINGS_PROMPT
+    assert "REVISION" in FINDINGS_PROMPT
+    assert "FIRST BRIEF" in FINDINGS_PROMPT
 
 
 def test_the_subject_prompt_handles_shared_names():

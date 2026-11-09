@@ -1,7 +1,15 @@
+"""The prompts the pipeline actually sends must match the schema it validates.
+
+This file used to read a single mega-prompt that no caller ever sent: the live
+pipeline generates the report in three stages. The contract it enforces is still
+the right one — a prompt asking for a field the model does not have, or a model
+field the prompt must never request, is a defect — so the assertions now read the
+three stage prompts and the Pydantic model together.
+"""
 import re
 from pathlib import Path
 
-from app.services.analysis import BriefingReport, SYSTEM_PROMPT
+from app.models.briefing import BriefingReport
 from app.services.report_stages import (
     ANALYSIS_PROMPT,
     FINDINGS_PROMPT,
@@ -31,9 +39,9 @@ POSSIBLE_SECTION = "possible_facts"
 FORWARD_SECTION = "forward_looking"
 QUOTE_SECTION = "quote"
 
-
-def _prompt_schema_block() -> str:
-    return SYSTEM_PROMPT[SYSTEM_PROMPT.index("Schema:") + len("Schema:"):].strip()
+# The three prompts, joined: every field a prompt may request must appear in the
+# stage that writes it, and the union is what the BriefingReport is assembled from.
+ALL_PROMPTS = FINDINGS_PROMPT + "\n" + ANALYSIS_PROMPT + "\n" + RECOMMENDATION_PROMPT
 
 
 def test_top_level_keys_match():
@@ -53,16 +61,22 @@ def test_top_level_keys_match():
 
 
 def test_forward_looking_and_quote_are_never_requested_from_the_model():
-    block = _prompt_schema_block()
-    assert FORWARD_SECTION not in block
-    assert QUOTE_SECTION not in block
+    # They may be *mentioned* (the analysis prompt is told a quote may be
+    # supplied), but they must never appear as a field the model has to emit.
+    schema_parts = [
+        prompt[prompt.index("Reply with JSON only:"):]
+        for prompt in (FINDINGS_PROMPT, ANALYSIS_PROMPT, RECOMMENDATION_PROMPT)
+    ]
+    for part in schema_parts:
+        assert f'"{FORWARD_SECTION}"' not in part
+        assert f'"{QUOTE_SECTION}"' not in part
 
 
-def test_analysis_is_documented_in_the_prompt():
-    block = _prompt_schema_block()
+def test_analysis_is_documented_in_its_own_stage():
     assert re.search(
-        r'"analysis":\s*\{"assessment":\s*str,\s*"risks":\s*\[str\]\}', block
-    ), "analysis missing from the prompt schema block"
+        r'"analysis":\s*\{"assessment":\s*str,\s*"risks":\s*\[str\]\}',
+        ANALYSIS_PROMPT,
+    ), "analysis missing from the analysis-stage prompt"
 
 
 def test_the_analysis_field_is_not_a_second_recommendation():
@@ -77,35 +91,32 @@ def test_the_analysis_field_is_not_a_second_recommendation():
 def test_the_audit_field_is_never_requested_from_the_model():
     # removed_claims is produced by report_audit, not by the generator. Asking the
     # model for it would let a reply declare itself clean.
-    assert AUDIT_SECTION not in _prompt_schema_block()
+    assert AUDIT_SECTION not in ALL_PROMPTS
 
 
 def test_possible_facts_are_never_requested_from_the_model():
     # These come from the incidental lane, which the prompt never sees at all.
-    assert POSSIBLE_SECTION not in _prompt_schema_block()
-
-def test_the_audit_field_is_never_requested_from_the_model():
-    # removed_claims is produced by report_audit, not by the generator. Asking the
-    # model for it would let a reply declare itself clean.
-    assert AUDIT_SECTION not in _prompt_schema_block()
+    assert POSSIBLE_SECTION not in ALL_PROMPTS
 
 
-def test_revision_field_is_documented_in_the_prompt():
-    assert re.search(
-        r'"%s":\s*\[\{"change": str, "why": str\}\]' % REVISION_SECTION,
-        _prompt_schema_block(),
-    ), "changes_since_previous missing from the prompt schema block"
+def test_revision_field_is_requested_only_on_a_revision():
+    # The findings stage owns this field, because a revision extends findings.
+    # It must be documented there and must be told to be omitted on a first brief.
+    findings_schema = FINDINGS_PROMPT[FINDINGS_PROMPT.index("Reply with JSON only:"):]
+    assert REVISION_SECTION in findings_schema
+    assert "FIRST BRIEF" in FINDINGS_PROMPT
+    assert "must be omitted entirely" in FINDINGS_PROMPT
 
 
 def test_section_shape_match():
     real = BriefingReport.model_json_schema()
-    schema_block = _prompt_schema_block()
+    findings_schema = FINDINGS_PROMPT[FINDINGS_PROMPT.index("Reply with JSON only:"):]
     for name in SECTIONS:
         ref = real["properties"][name]["$ref"].split("/")[-1]
         definition = real["$defs"][ref]
         assert list(definition["properties"].keys()) == ["items"], name
         assert definition["properties"]["items"]["type"] == "array", name
-        assert re.search(r'"%s":\s*\{"items":\s*\[' % name, schema_block), name
+        assert re.search(r'"%s":\s*\{"items":\s*\[' % name, findings_schema), name
 
 
 def test_claim_fields_match():
@@ -137,10 +148,9 @@ def test_executive_summary_fields_match():
     real = BriefingReport.model_json_schema()
     summary_props = list(real["$defs"]["ExecutiveSummary"]["properties"].keys())
     assert summary_props == ["summary", "recommendation", "confidence"], summary_props
-    assert re.search(
-        r'"executive_summary":\s*\{"summary": str, "recommendation": str, "confidence": str\}',
-        _prompt_schema_block(),
-    )
+    schema_part = RECOMMENDATION_PROMPT[RECOMMENDATION_PROMPT.index("Reply with JSON only:"):]
+    for field in ("summary", "recommendation", "confidence"):
+        assert f'"{field}": str' in schema_part, field
 
 
 def test_no_ghost_fields():
@@ -150,4 +160,6 @@ def test_no_ghost_fields():
 
 
 def test_no_legacy_input_tags():
-    assert re.search(r"<NEWS>|<HIRES>|<LAUNCHES>|<OPEN_QUESTIONS>|<RISKS>", SYSTEM_PROMPT) is None
+    # The blocks the model is told to read are the ones the renderers emit.
+    legacy = r"<NEWS>|<HIRES>|<LAUNCHES>|<OPEN_QUESTIONS>|<RISKS>"
+    assert re.search(legacy, ALL_PROMPTS) is None
