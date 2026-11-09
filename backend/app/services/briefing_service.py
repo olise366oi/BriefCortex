@@ -456,16 +456,59 @@ async def _process_job(briefing_id: uuid.UUID, settings: Settings) -> None:
     except Exception:
         # The traceback goes to the log; the stored message stays safe to show.
         logger.exception("Briefing job failed | id=%s", briefing_id)
-        try:
-            repo.update(
-                briefing_id,
-                status=BriefingJobStatus.FAILED.value,
-                error=USER_FACING_ERROR,
-            )
-        except Exception:
-            logger.exception("Could not mark briefing as failed | id=%s", briefing_id)
+        _mark_failed(db, briefing_id)
     finally:
         db.close()
+
+
+def _mark_failed(db: Session, briefing_id: uuid.UUID) -> None:
+    """Record the failure, on a connection that is still usable if one is not.
+
+    A job can fail because the database went away mid-run — a managed Postgres
+    closes an idle connection and the next query raises inside a long retrieval.
+    The session that hit that error is then in a broken transaction: every further
+    statement raises ``PendingRollbackError``, so the obvious retry (mark the row
+    failed on the same session) fails too and the row is stranded in `processing`
+    forever. Measured: exactly that, and the UI polled a job that would never
+    finish.
+
+    So the broken session is rolled back first, and if it still cannot write, a
+    fresh session tries. Whatever happens here is reported, never raised: this
+    runs inside the failure path and must not mask the original error.
+    """
+    try:
+        db.rollback()
+        BriefingRepository(db).update(
+            briefing_id,
+            status=BriefingJobStatus.FAILED.value,
+            error=USER_FACING_ERROR,
+        )
+        return
+    except Exception as exc:
+        logger.warning(
+            "Could not mark briefing failed on the job session | id=%s | %s",
+            briefing_id,
+            exc,
+        )
+
+    fresh: Optional[Session] = None
+    try:
+        fresh = SessionLocal()
+        BriefingRepository(fresh).update(
+            briefing_id,
+            status=BriefingJobStatus.FAILED.value,
+            error=USER_FACING_ERROR,
+        )
+        logger.info("Briefing marked failed on a fresh connection | id=%s", briefing_id)
+    except Exception:
+        logger.exception(
+            "Could not mark briefing failed at all | id=%s | the stale-job sweep "
+            "will close it on next startup",
+            briefing_id,
+        )
+    finally:
+        if fresh is not None:
+            fresh.close()
 
 
 def _spawn_job(briefing_id: uuid.UUID, settings: Settings) -> None:

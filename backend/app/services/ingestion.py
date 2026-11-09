@@ -59,6 +59,7 @@ from app.services.legal_signals import legal_queries
 from app.services.media_trust import (
     generate_local_queries,
     infer_jurisdiction,
+    is_refused_host,
     order_by_trust,
     resolve_policy,
 )
@@ -110,10 +111,17 @@ MIN_POSTING_LINE_CHARS = 20
 # Cap roles per source so one aggregator page cannot fill the hiring block.
 MAX_POSTINGS_PER_SOURCE = 10
 
-# Queries a replanned round may propose after the opening lanes found nothing.
+# Queries a replanned round may propose after the opening lanes came back thin.
 # Deliberately small: this round exists to try a different angle, not to run a
 # second full plan.
 SUPPLEMENT_MAX_QUERIES = 3
+
+# The opening round is judged thin below this many usable bodies, and a replanned
+# round is attempted once. Measured on a real run: 77 URLs from the opening round
+# still produced only a handful of usable bodies, and a brief built from fewer than
+# six sources cannot carry a conclusion — the coverage ledger already calls that
+# "partial". Six is the point where a second angle is worth one more paid round.
+SUPPLEMENT_BELOW_USABLE = 6
 
 async def _search_query(
     query: str,
@@ -276,7 +284,7 @@ async def _refill_missing_bodies(
     return merged
 
 
-async def _supplement_empty_round(
+async def _supplement_thin_round(
     plan: SearchPlan,
     start_date: str,
     end_date: str,
@@ -286,20 +294,27 @@ async def _supplement_empty_round(
     aliases: Optional[List[str]],
     meeting_purpose: str = "",
     tried_queries: Optional[List[str]] = None,
+    national_domains: Optional[List[str]] = None,
 ) -> int:
-    """One replanned round after the opening lanes found nothing usable.
+    """One replanned round when the opening lanes came back thin.
 
-    The first round asks the planner what to search; this one asks it what to
-    search *instead*, and is told why the first attempt failed — the queries, the
-    domains, and the result counts. It runs against the open web rather than the
-    publisher registry, because the reason a company is invisible to the
-    financial press is usually that it is covered somewhere else: a trade
-    publication, a regulator's page, its own site.
+    The opening round asks the planner what to search. When it returns fewer than
+    ``SUPPLEMENT_BELOW_USABLE`` usable bodies, that plan was not enough, so the
+    model is shown what already failed — the queries, the domains, the result
+    counts — and asked for a different angle.
+
+    ``national_domains`` is the trusted press list learned for the company's own
+    country. The supplement searches it **first**, because a company invisible to
+    the international wire list is usually covered where it lives: measured, an
+    English query against Japanese titles returned the English edition of one
+    paper, while a query in Japanese against the same titles returned nine usable
+    bodies. The open web runs behind that list, so a company genuinely missing
+    from its national press is still reachable.
 
     Returns how many usable results it added. Zero is a normal and expected
-    answer: the model may reply that the company has no coverage in the
-    window, and that finding belongs in the coverage ledger rather than in
-    another paid search.
+    answer: the model may reply that the company has no coverage in the window,
+    and that finding belongs in the coverage ledger rather than in another paid
+    search.
     """
     result = await replan_after_empty(
         company_name,
@@ -324,18 +339,34 @@ async def _supplement_empty_round(
         )
         return 0
 
+    # The national list leads, the open web follows. A supplement has no publish
+    # date guarantee either way, so it runs undated and the window filter rejects
+    # anything outside it afterwards.
+    domains = [d for d in (national_domains or []) if not is_refused_host(d)]
+
     logger.info(
-        "Supplement round | queries=%s | reason=%s", result.queries, result.reason
+        "Supplement round | domains=%s | queries=%s | reason=%s",
+        domains or "(open web)",
+        result.queries,
+        result.reason,
     )
 
-    # Open web, no domain restriction: the point is to reach the sources the
-    # publisher registry does not contain. A supplement has no publish date
-    # guarantee either, so it runs undated and the window filter rejects anything
-    # outside it afterwards.
     _kept, usable, _added = await _run_round(
-        result.queries, [], start_date, end_date, company_name,
+        result.queries, domains, start_date, end_date, company_name,
         merged, seen_urls, aliases, dated=False,
     )
+
+    # If the national list produced nothing, the same queries against the open
+    # web are still worth one pass: the usual reason a company is invisible to
+    # the press is that it is covered somewhere else entirely.
+    if usable == 0 and domains:
+        logger.info("Supplement | national list empty, retrying on the open web")
+        _kept2, usable2, _added2 = await _run_round(
+            result.queries, [], start_date, end_date, company_name,
+            merged, seen_urls, aliases, dated=False,
+        )
+        usable += usable2
+
     return usable
 
 
@@ -351,6 +382,7 @@ async def _search_plan(
     local_queries: Optional[List[str]] = None,
     local_domains: Optional[List[str]] = None,
     meeting_purpose: str = "",
+    national_press: Optional[List[str]] = None,
 ) -> List[dict]:
     """Run the planned queries until two consecutive rounds bring nothing new.
 
@@ -447,20 +479,21 @@ async def _search_plan(
         time.monotonic() - started_at,
     )
 
-    # Nothing usable came back from any lane. Replanning is not a retry: repeating
-    # a search that returned nothing returns nothing again, so the model is asked
-    # for a different angle (a legal name, a broader topic, another kind of
+    # A thin opening round is not enough to brief from. Replanning is not a retry:
+    # repeating a search that returned little returns little again, so the model is
+    # asked for a different angle (a legal name, a broader topic, another kind of
     # source) and the answer may legitimately be "this company has no coverage".
     #
     # The bound is one attempt per request. A company nobody writes about would
     # otherwise pay a model call and a round of Tavily on every run and learn
     # nothing, and the coverage ledger already tells the reader what to check by
     # hand when the open web cannot answer.
-    if usable == 0 and time.monotonic() - started_at < SEARCH_BUDGET_SECONDS:
-        supplement = await _supplement_empty_round(
+    if usable < SUPPLEMENT_BELOW_USABLE and time.monotonic() - started_at < SEARCH_BUDGET_SECONDS:
+        supplement = await _supplement_thin_round(
             plan, start_date, end_date, company_name, merged, seen_urls, aliases,
             meeting_purpose=meeting_purpose,
             tried_queries=list(plan.queries) + list(open_queries or []),
+            national_domains=list(national_press),
         )
         if supplement:
             usable += supplement
@@ -1193,6 +1226,7 @@ async def ingest_company_data(
             local_queries=local_queries,
             local_domains=local_domains,
             meeting_purpose=request.meeting_purpose.strip(),
+            national_press=list(trust_policy.national),
         )
     else:
         # Everything up to today is already covered, so reuse what is stored

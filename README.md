@@ -304,23 +304,29 @@ generic financial terms, and why the counterparty lane exists.
 a round counts as productive only when it yields a result that carries an article
 body, and the body-refill round is skipped once enough results already have one.
 
-#### When nothing at all comes back
+#### When the opening round comes back thin
 
-If every lane returns zero usable results, the plan is asked to think again —
-**once**, and only then. `services/search_planner.py::replan_after_empty` receives
-the queries that ran, the domains that were searched and the result counts, and
-proposes a different angle rather than a paraphrase: the company's legal name,
-ticker or parent; a broader topic; a different kind of source; or a plain statement
-that nothing was published inside the window. The round runs against the **open
-web**, because the usual reason a company is invisible to the financial press is
-that it is covered somewhere else.
+If the opening lanes return **fewer than six usable bodies**, the plan is asked
+to think again — **once**, and only then. `services/search_planner.py::replan_after_empty`
+receives the queries that ran, the domains that were searched and the result
+counts, and proposes a different angle rather than a paraphrase: the company's
+legal name, ticker or parent; a broader topic; a different kind of source; or a
+plain statement that nothing was published inside the window.
 
-It is not a retry. Repeating a search that returned nothing returns nothing again,
-so a query already tried is dropped from the reply. And an empty answer is a
-**valid** answer: when the model concludes the company has no coverage — a private
-firm, a name collision, a dormant entity — no further search runs. The brief then
-says so and hands the reader the five manual checks (`checks_to_run`), which is
-cheaper and more honest than paying for a second empty round.
+The supplement searches the **trusted national press list first** and the open web
+behind it. That list is the model's own reading of which publications cover a
+company in its own country, learned once per country and stored; a company
+invisible to the international wire list is usually covered where it lives.
+Measured: an English query against Japanese titles returned the English edition of
+one paper, while a query in Japanese against the same titles returned nine usable
+bodies.
+
+It is not a retry. A query already tried is dropped from the reply, because
+repeating a search that returned little returns little again. And an empty answer
+is a **valid** answer: when the model concludes the company has no coverage — a
+private firm, a name collision, a dormant entity — no further search runs. The
+brief then says so and hands the reader the five manual checks (`checks_to_run`),
+which is cheaper and more honest than paying for a second empty round.
 
 The bound is one attempt per request, so a company nobody writes about does not
 spend a model call and a Tavily round on every run.
@@ -587,7 +593,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 466 passed.
+Expected: 473 passed.
 
 The gateway policy package ships its own suite, runnable without this backend:
 

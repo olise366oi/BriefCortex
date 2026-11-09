@@ -30,29 +30,32 @@ BriefCortex/
 │       └── styles/globals.css
 ├── backend/
 │   ├── app/
-│   │   ├── api/endpoints/briefing.py
-│   │   ├── core/                    # config + database
-│   │   ├── db/models.py             # SQLAlchemy BriefingRecord
-│   │   ├── repositories/            # BriefingRepository
-│   │   ├── models/briefing.py       # Pydantic HTTP schemas
-│   │   ├── services/
+│   │   ├── api/endpoints/           # briefing.py, debug.py
+│   │   ├── core/                    # config, database, alembic check
+│   │   ├── db/models.py             # BriefingRecord, EvidenceFact, …
+│   │   ├── repositories/            # BriefingRepository, EvidenceRepository
+│   │   ├── models/                  # Pydantic schemas (briefing, fact_base)
+│   │   ├── services/                # retrieval, analysis, audit, caching
 │   │   └── mock/
+│   ├── migrations/                  # Alembic revisions
 │   └── tests/
+├── bifrost-cache-policy/            # standalone gateway cache rules
 ├── docs/
-└── docker-compose.yml               # local Postgres
+└── docker-compose.yml               # Postgres + Bifrost gateway + Redis Stack
 ```
 
 ## How to Run Locally
 
 ```bash
-# Postgres (Docker or local service)
+# Postgres (Docker or local service). The compose file also runs the Bifrost
+# gateway and Redis Stack; only `db` is needed to start the API.
 docker compose up -d db
-# create DB if needed: briefcortex
 
 # Backend
 cd backend
 pip install -r requirements.txt
 cp .env.example .env
+python -m alembic upgrade head     # schema is managed by migrations, not create_all
 uvicorn app.main:app --reload --port 8000
 
 # Frontend
@@ -85,8 +88,12 @@ npm run dev
 
 ## Gotchas
 
-- Tables are created on startup via `init_db()` (`Base.metadata.create_all`).
+- The schema is managed by Alembic (`python -m alembic upgrade head`). `init_db()`
+  does **not** create tables; it checks that the migrations have been applied and
+  points at the command when they have not.
 - Report payload is stored as JSONB and only read back by id.
+- Evidence is persisted separately (`evidence_facts`, `evidence_coverage`), so a
+  re-run searches only the days not yet covered instead of the whole window.
 - Conflict detection must never be serialized into the LLM prompt.
 
 ## What NOT to Do
