@@ -1,10 +1,9 @@
 # /backend/app/services/analysis.py
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
-from typing import Tuple
-
+from openai import AsyncOpenAI
 from pydantic import ValidationError
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_random_exponential
 

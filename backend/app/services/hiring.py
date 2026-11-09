@@ -60,6 +60,19 @@ HIRING_FIELD_LABELS = (
     "eligibility",
     "designation",
     "no. of vacancies",
+    # North American boards label a posting with these instead. A Canadian
+    # aggregator's every role arrived as "… Job Title: QC In-Line Inspector",
+    # which matched none of the labels above, so seven postings were stored as
+    # hard facts and the hiring lane reported zero.
+    "job title",
+    "job posting",
+    "position title",
+    "job id",
+    "job reference",
+    "titre du poste",
+    "lieu de travail",
+    "date de debut",
+    "poste",
 )
 
 # An explicit invitation to apply. A story that merely mentions hiring does not
@@ -265,10 +278,43 @@ def is_hiring_line(text: str) -> bool:
     if _opens_with_field_label(line):
         return True
 
+    # Aggregator pages concatenate the location block and the role into one line,
+    # so the label lands mid-line: "Canada Goose Inc. Scarborough ON Location:
+    # … Job Title: QC In-Line Inspector". Only the labels that name a role are
+    # accepted here — an inline "Department:" is every article that mentions a
+    # department and would flood the lane.
+    if _carries_role_label(line):
+        return True
+
     if any(phrase in lowered for phrase in HIRING_STATEMENTS):
         return True
 
     return _looks_like_role_title(line)
+
+
+# Labels that name an open role wherever they appear on the line. Deliberately
+# narrower than HIRING_FIELD_LABELS: the rest describe what a role requires.
+INLINE_ROLE_LABELS = (
+    "job title",
+    "position title",
+    "designation",
+    "titre du poste",
+    "poste",
+)
+
+
+def _carries_role_label(line: str) -> bool:
+    """True when a role-naming label appears anywhere in the line."""
+    for label in INLINE_ROLE_LABELS:
+        pattern = re.compile(
+            rf"{re.escape(label)}(?:e?s)?[\W_]*(?:[:\-\u2013\uff1a]|\*\*)"
+            rf"[\W_]*(\S.*)",
+            re.IGNORECASE,
+        )
+        match = pattern.search(line)
+        if match and len(match.group(1).strip()) >= MIN_ROLE_TITLE_CHARS:
+            return True
+    return False
 
 
 def _opens_with_field_label(line: str) -> bool:

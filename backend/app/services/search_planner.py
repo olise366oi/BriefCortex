@@ -281,10 +281,18 @@ def _sanitize(
     categories = categories[:MAX_DOMAIN_CATEGORIES]
 
     domains = _resolve_domains_for_jurisdiction(categories, policy)
+
+    # The accumulator was missing, so every model-produced plan raised NameError
+    # here and the caller's `except` silently substituted the heuristic plan.
+    # The whole "let the model decide what to search" behaviour never ran in
+    # production; it only ever returned the four hard-coded financial queries.
+    queries: List[str] = []
     for query in plan.queries:
         text = query.strip()
         if not text:
             continue
+        # The company name anchors the query, so a plan phrase like "supply
+        # chain pricing pressure" cannot drift onto an unrelated company.
         if company.lower() not in text.lower():
             text = f"{company} {text}"
         if text not in queries:

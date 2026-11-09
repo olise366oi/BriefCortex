@@ -61,7 +61,7 @@ from app.services.media_trust import (
     resolve_policy,
 )
 from app.services.logger_service import get_logger
-from app.services.publisher_filter import extract_clean_text, host_of
+from app.services.publisher_filter import extract_clean_text
 from app.services.search_planner import SearchPlan, plan_searches
 from app.services.tavily_search import extract_bodies, tavily_search
 from app.services.window import compute_evidence_window
@@ -1070,13 +1070,16 @@ async def ingest_company_data(
 
     # Stored evidence was retrieved on an earlier run; it belongs to the same
     # company and the same window, so it is merged rather than re-fetched.
-    reused = [item for item in (stored_facts or []) if item.publish_date is not None]
-    hard_facts = _merge_reused_facts(reused, hard_facts)
-
-    reused_opinions = [
-        item for item in (stored_opinions or []) if item.publish_date is not None
-    ]
-    analyst_opinions = _merge_reused_facts(reused_opinions, analyst_opinions)
+    #
+    # A stored fact whose publication date could not be recovered used to be
+    # dropped here, which made the store lossy: 74% of one measured company's
+    # facts were undated, so every run silently shrank the evidence set it had
+    # already paid to collect (35 stored → 28 usable on the next run). Undated
+    # facts are now reused as-is. The window filter already ran before they were
+    # stored, so they were inside the window when they were admitted; re-checking
+    # a date we do not have is not a check, it is a deletion.
+    hard_facts = _merge_reused_facts(list(stored_facts or []), hard_facts)
+    analyst_opinions = _merge_reused_facts(list(stored_opinions or []), analyst_opinions)
 
     # A promise is not an event. Splitting them here keeps stated intent out of
     # the evidence the model reasons over, so a recommendation can never rest on
@@ -1214,7 +1217,7 @@ async def ingest_company_data(
 
     logger.info(
         "Ingestion complete | company_id=%s | extracted=%s | skipped=%s | "
-        "duplicate=%s | stale_source=%s | stale_fact=%s | reused=%s | "
+        "duplicate=%s | stale_source=%s | stale_fact=%s | reused_facts=%s | "
         "hard_facts=%s | analyst_opinions=%s | hiring=%s | incidental=%s | conflicts=%s",
         fact_base.company_id,
         stats["extracted"],
@@ -1222,7 +1225,7 @@ async def ingest_company_data(
         stats["duplicate"],
         stats["stale_source"],
         stats["stale_fact"],
-        len(reused),
+        len(stored_facts or []),
         len(fact_base.hard_facts),
         len(fact_base.analyst_opinions),
         len(fact_base.hiring),

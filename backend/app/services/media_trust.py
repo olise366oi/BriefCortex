@@ -70,6 +70,27 @@ REFUSED_HOSTS: Tuple[str, ...] = (
     "valuengine.com", "stockanalysis.com", "tipranks.com", "benzinga.com",
     "insidermonkey.com", "24wallst.com", "nai500.com", "biggo.com",
     "whatsmode.com",
+    # Job-board aggregators that are not the company's own careers page. A
+    # Canadian run filed seven roles from one of these into the hard-fact lane,
+    # because the page is prose-shaped and not on this list.
+    "eluta.ca", "jobzmall.com", "talent.com", "neuvoo.com", "jooble.org",
+    "workopolis.com", "careerjet.ca", "ca.indeed.com", "jobs.ca",
+    "smartrecruiters.com", "lever.co", "greenhouse.io", "workday.com",
+    "myworkdayjobs.com", "icims.com",
+    # Paid company-profile databases: the visible page is a sales pitch, and
+    # "Gain a 360-degree view … Learn more" was reaching the fact base.
+    "globaldata.com", "dnb.com", "bisnode.com", "moodys.com",
+    "refinitiv.com", "factset.com",
+    # Wildlife and species pages. The name collides: a run for the outerwear
+    # brand returned federal and state "Canada goose" management programmes.
+    # These are refused by host so the collision never becomes evidence.
+    "fws.gov", "ncwildlife.gov", "dec.ny.gov", "portal.ct.gov",
+    "birdsoftheworld.org", "allaboutbirds.org", "audubon.org",
+    "ncbi.nlm.nih.gov", "pmc.ncbi.nlm.nih.gov",
+    # Law-firm blogs and class-action solicitation pages. They restate a filing
+    # this pipeline already reads directly, and they exist to collect claimants.
+    "topclassactions.com", "edelson-law.com", "ahdootwolfson.com",
+    "stollberne.com", "zlk.com",
 )
 
 # Filings, newswires and regulators: the company's own words. Trusted everywhere

@@ -111,6 +111,8 @@ def extract_hard_facts(clean_text: str) -> List[str]:
         sentence = first_sentence(paragraph)
         if not sentence or not has_negative_signal(sentence):
             continue
+        if is_structural_noise(sentence):
+            continue
 
         negative_texts.append(sentence)
         if len(negative_texts) >= NEGATIVE_SIGNAL_MAX_PER_SOURCE:
@@ -141,6 +143,10 @@ def extract_analyst_opinions(clean_text: str, hard_facts: List[str]) -> List[str
             continue
         if dedup_key(sentence) in dropped:
             continue
+        # A table row survives paragraph splitting when the row is long enough to
+        # look like prose; the sentence that comes out of it is still a row.
+        if is_structural_noise(sentence):
+            continue
 
         opinions.append(sentence)
         if len(opinions) >= OPINION_MAX_PER_SOURCE:
@@ -150,12 +156,100 @@ def extract_analyst_opinions(clean_text: str, hard_facts: List[str]) -> List[str
 
 
 def _paragraphs(clean_text: str) -> List[str]:
-    """Split clean text into paragraph-level blocks worth reading."""
+    """Split clean text into paragraph-level blocks worth reading.
+
+    A block has to be prose that states something. Three shapes look like
+    paragraphs and are not: a markdown table row, a subscription prompt, and a
+    filing's structural boilerplate. All three were measured reaching the fact
+    base of a live run and being read as evidence — a row of a geographic
+    revenue table became a "fact", and "Gain a 360-degree view … Learn more"
+    became another.
+    """
     return [
         paragraph.strip()
         for paragraph in re.split(r"\n\s*\n", clean_text)
-        if paragraph.strip() and len(paragraph.strip()) >= MIN_PARAGRAPH_LENGTH
+        if paragraph.strip()
+        and len(paragraph.strip()) >= MIN_PARAGRAPH_LENGTH
+        and not is_structural_noise(paragraph.strip())
     ]
+
+
+# A markdown table row: cells separated by pipes. Tavily returns XBRL and
+# financial statements this way, and a row of numbers with no sentence around
+# them is not a fact anyone can cite in a meeting.
+_TABLE_ROW_RE = re.compile(r"^\s*\|?[^|\n]*\|[^|\n]*\|")
+
+# A row of dashes under a header ("| --- | --- | --- |") is pure formatting.
+_TABLE_RULE_RE = re.compile(r"^[\s|:\-]+$")
+
+# Marketing copy that a vendor page pads its description with. It names the
+# reader's benefit, never the company's situation.
+_MARKETING_RE = re.compile(
+    r"(gain a 360|gain access|learn more|request a demo|book a demo|"
+    r"sign up for|subscribe to|start your free trial|contact sales|"
+    r"premium signals|all rights reserved|cookie policy|"
+    r"why choose us|trusted by \d)",
+    re.IGNORECASE,
+)
+
+# Filing furniture: statements about the document rather than the business.
+_FILING_BOILERPLATE_RE = re.compile(
+    r"(is a non-ifrs (financial )?measure|are non-ifrs|"
+    r"constant currency (revenue )?(is|was) a non-ifrs|"
+    r"exhibit no\.|^description$|press release of .*, dated|"
+    r"forward-looking statements? (in this|contained)|"
+    r"this (annual|quarterly) report (contains|includes) forward)",
+    re.IGNORECASE,
+)
+
+
+def is_structural_noise(text: str) -> bool:
+    """True when a block is document structure rather than a statement.
+
+    Narrow on purpose. It rejects a block only when the whole block is
+    formatting or vendor copy, so a sentence that happens to sit inside a table
+    cell still survives: an earnings sentence in a table is the earnings
+    sentence, and dropping it would lose the fact rather than the noise.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return True
+
+    # A block that is entirely a table rule ("| --- | --- |").
+    if _TABLE_RULE_RE.match(stripped):
+        return True
+
+    # A block delimited by pipes at both ends is a table row, whatever its
+    # length: "| North America | 70% DTC, 20% Wholesale, 10% Other |" has only
+    # three cells and is still furniture, not a sentence.
+    if stripped.startswith("|") and stripped.endswith("|") and not _has_sentence(stripped):
+        return True
+
+    # A block that is mostly pipes, with too little prose to state anything.
+    pipe_count = stripped.count("|")
+    if pipe_count >= 4 and len(stripped) < 240 and not _has_sentence(stripped):
+        return True
+
+    if _MARKETING_RE.search(stripped):
+        return True
+
+    if _FILING_BOILERPLATE_RE.search(stripped):
+        return True
+
+    return False
+
+
+def _has_sentence(text: str) -> bool:
+    """True when the block carries prose a reader could quote as a fact."""
+    words = re.findall(r"[A-Za-z]{3,}", text)
+    if len(words) < 8:
+        return False
+    # A sentence needs a verb-like word; this is a coarse test, deliberately
+    # permissive so it never removes real reporting.
+    return any(
+        word.lower().endswith(("ed", "ing", "s"))
+        for word in words
+    ) or " is " in text.lower() or " was " in text.lower()
 
 
 def source_tier(url: str) -> int:

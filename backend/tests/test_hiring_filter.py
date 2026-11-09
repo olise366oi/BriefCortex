@@ -102,3 +102,39 @@ def test_article_slugs_mentioning_jobs_are_not_careers_urls():
     )
     for url in articles:
         assert is_careers_url(url) is False, url
+
+
+# --- role labels as North American boards actually write them ----------
+#
+# Measured on a live run for Canada Goose: every role from a Canadian
+# aggregator arrived as "… Job Title: QC In-Line Inspector". "job title" was
+# absent from the field-label vocabulary, so seven postings were stored as
+# hard facts while the hiring lane reported zero findings — the facts looked
+# populated and the brief said "no hiring signal".
+
+NORTH_AMERICAN_ROLE_LINES = (
+    "Job Title: QC In-Line Inspector",
+    "Position Title: Lead, Fabric Developer",
+    "Tire du poste: Specialist, Continuous Improvement (18 Month Contract)",
+    # An aggregator concatenates the location block and the role into one line,
+    # so the label lands mid-line rather than opening it.
+    "Canada Goose Inc. Scarborough ON Location: CGS1 Address: 33 Commander Blvd "
+    "Scarborough, Ontario M1S 3E7 Canada Job Title: Technologist, Industrial Eng",
+)
+
+
+@pytest.mark.parametrize("line", NORTH_AMERICAN_ROLE_LINES)
+def test_north_american_role_labels_are_hiring(line):
+    assert is_hiring_line(line) is True
+
+
+def test_earnings_text_naming_no_role_is_not_hiring():
+    # The guard that keeps the broader label from flooding the lane.
+    not_hiring = (
+        "Canada Goose reported a net loss of C$26.3 million for the quarter.",
+        "The company appointed a new chief financial officer.",
+        "The program manages resident Canada goose populations.",
+        "| Region | Fiscal 2024 | Fiscal 2023 |",
+    )
+    for line in not_hiring:
+        assert is_hiring_line(line) is False, line
