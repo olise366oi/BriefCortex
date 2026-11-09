@@ -30,6 +30,7 @@ from app.services.forward_looking import split_forward_looking
 from app.services.market_data import fetch_quote
 from app.services.article_subject import classify_article_subjects
 from app.services.company_identity import (
+    CompanyIdentity,
     disambiguate_with_model,
     jurisdiction_from_description,
     jurisdiction_from_url,
@@ -88,6 +89,14 @@ MIN_USABLE_PER_ROUND = 1
 # compared with both the URLs seen this run and the URLs already stored. One
 # fully-duplicate round can be a reordering; two in a row means the queries are
 # exhausted.
+#
+# Measured on a real run (four lanes, 28 planned queries): the opening concurrent
+# round returned 75 URLs, then rounds 2..5 added 0, 2, 0, 0. Two consecutive
+# empty rounds is the right stopping point — the run stopped at round 5 having
+# spent four extra Tavily rounds for two articles, and stopping at round 4 would
+# have missed them. The cap is therefore correct; what was wrong was that nothing
+# documented it, so a reader could not tell whether the run had converged or been
+# truncated.
 MAX_STALE_ROUNDS = 2
 
 # Once this many results already carry a body, the body refill is skipped: it
@@ -799,6 +808,34 @@ def _drop_out_of_window(
     return kept
 
 
+def jurisdiction_from_registry(
+    identity: Optional["CompanyIdentity"], company: str
+) -> Optional[str]:
+    """Return the country the registry vouches for, or None.
+
+    The registry match is used only when it is confident. A fuzzy match on a
+    group's name routinely lands on a subsidiary in the wrong country — measured:
+    "YKK" resolved to "YKK FRANCE" at 0.52 confidence, which pointed the Japanese
+    parent's press list at French titles and made every national query search the
+    wrong country's press. A subsidiary's jurisdiction is not the group's, so an
+    unconfident match is treated as no match: the caller then falls back to the
+    company's own domain and, failing that, to the model.
+    """
+    if identity is None:
+        return None
+    if getattr(identity, "confident", False):
+        return identity.jurisdiction
+
+    logger.info(
+        "Registry match not confident | company=%r | legal=%r | juris=%s | "
+        "using the domain or the model instead",
+        company,
+        getattr(identity, "name", None),
+        identity.jurisdiction,
+    )
+    return None
+
+
 def _likely_company_domain(company: str) -> str:
     """Return the most likely official domain of a company, or an empty string.
 
@@ -985,7 +1022,8 @@ async def ingest_company_data(
     # domain instead. A private firm has no LEI but it does publish where it is
     # based, and reading a Japanese company through an English-language wire list
     # is what turned its coverage into a decade of American litigation filings.
-    press_jurisdiction = identity.jurisdiction if identity is not None else None
+    press_jurisdiction = jurisdiction_from_registry(identity, company_label)
+
     if not press_jurisdiction:
         press_jurisdiction = jurisdiction_from_url(_likely_company_domain(company_label))
         if press_jurisdiction:

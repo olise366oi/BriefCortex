@@ -1,11 +1,14 @@
 """Tests for chrome filtering, hiring separation, caching and identity."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy import text
 
-from app.services.cache import CacheEntry, DEFAULT_TTL_HOURS, request_key
+from app.core.database import SessionLocal
+from app.repositories.briefing_repository import BriefingRepository
+from app.services.cache import DEFAULT_TTL_HOURS
 from app.services.company_identity import CompanyIdentity, _name_similarity
 from app.services.hiring import hiring_queries
 from app.services.incidental import is_chrome_line, opening_sentence
@@ -65,50 +68,49 @@ def test_hiring_queries_cover_careers_and_expansion():
     assert any("hiring" in query for query in queries)
 
 
-def test_request_key_is_stable_for_the_same_request():
-    moment = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+def test_the_request_cache_matches_on_company_purpose_and_day():
+    """The request cache matches on fields, so it lives in the repository.
 
-    first = request_key("Zydus Lifesciences", "", moment)
-    second = request_key("Zydus Lifesciences", "", moment)
+    These cases used to exercise `cache.request_key`, a hash that nothing called:
+    the repository compares company / purpose / meeting-day columns directly. The
+    behaviour they describe is still required, so they now exercise what enforces
+    it.
+    """
+    db = SessionLocal()
+    try:
+        repo = BriefingRepository(db)
+        moment = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+        repo.create(
+            company_name="Zydus Probe",
+            meeting_time=moment,
+            meeting_purpose="pricing",
+            status="completed",
+        )
+        db.commit()
 
-    assert first == second
+        # Same company, same purpose, same day → matches.
+        assert repo.find_cached("Zydus Probe", "pricing", moment) is not None
+
+        # A different objective is a different brief.
+        assert repo.find_cached("Zydus Probe", "renewal", moment) is None
+
+        # A different day is a different window.
+        other = datetime(2026, 11, 11, 9, 0, tzinfo=timezone.utc)
+        assert repo.find_cached("Zydus Probe", "pricing", other) is None
+
+        # Minutes inside one day share the window.
+        later = datetime(2026, 11, 10, 16, 30, tzinfo=timezone.utc)
+        assert repo.find_cached("Zydus Probe", "pricing", later) is not None
+    finally:
+        db.execute(text("delete from briefings where company_name = 'Zydus Probe'"))
+        db.commit()
+        db.close()
 
 
-def test_request_key_ignores_minutes_within_the_same_day():
-    # The evidence window is anchored to the date, so two meetings on one day
-    # must share a brief.
-    morning = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
-    afternoon = datetime(2026, 11, 10, 16, 30, tzinfo=timezone.utc)
-
-    assert request_key("Zydus", "", morning) == request_key("Zydus", "", afternoon)
-
-
-def test_request_key_separates_different_purposes():
-    moment = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
-
-    assert request_key("Zydus", "pricing", moment) != request_key("Zydus", "", moment)
-
-
-def test_request_key_separates_different_days():
-    first = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
-    second = datetime(2026, 11, 11, 9, 0, tzinfo=timezone.utc)
-
-    assert request_key("Zydus", "", first) != request_key("Zydus", "", second)
-
-
-def test_cache_entry_expires():
-    created = datetime.now(timezone.utc) - timedelta(hours=DEFAULT_TTL_HOURS + 1)
-    entry = CacheEntry(report={}, evidence=None, created_at=created)
-
-    assert entry.is_valid(datetime.now(timezone.utc)) is False
-
-
-def test_fresh_cache_entry_is_valid():
-    entry = CacheEntry(
-        report={}, evidence=None, created_at=datetime.now(timezone.utc)
-    )
-
-    assert entry.is_valid(datetime.now(timezone.utc)) is True
+def test_the_cache_ttl_is_a_single_named_constant():
+    # The TTL is the one thing `services/cache.py` still owns; the lookup moved
+    # to the repository.
+    assert DEFAULT_TTL_HOURS > 0
 
 
 def test_short_name_inside_a_long_candidate_scores_lower():

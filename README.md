@@ -74,7 +74,7 @@ graph TD
     %% ---------- Retrieval: four lanes, concurrently ----------
     subgraph RETRIEVE["Retrieval — asyncio.gather"]
         Lanes["Lane 1: registry news<br/>dated, publisher-scoped"]
-        Lanes2["Lane 2: open domain<br/>regulator, careers. Undated"]
+        Lanes2["Lane 2: open domain<br/>regulator, careers,<br/>counterparty. Undated"]
         Lanes3["Lane 3: LinkedIn jobs<br/>undated"]
         Lanes4["Lane 4: local language<br/>national press only"]
         Lanes --> Tavily[Tavily API]
@@ -167,17 +167,29 @@ A 2023 layoff cannot be used as a 2026 negotiation lever.
 
 ### 2. Retrieval: Plan, Scope, Then Read
 
-Retrieval is not one query against a flat domain list. Three lanes — registry
-news, open web, LinkedIn postings — run **concurrently**, then merge.
+Retrieval is not one query against a flat domain list. Four lanes run
+**concurrently**, then merge: registry news (dated, publisher-scoped), open
+domain (regulators and careers pages, undated), LinkedIn postings, and queries
+written in the company's own country's language against that country's press.
 
-**Both sides are read.** The counterparty (B) gets the full pipeline. The caller's
-own company (A) is scanned for **market position only** — its quote and the
-coverage that moved it, over 60 days rather than the 30 a counterparty gets, because
-one month is too short to characterise the trend every deal is argued against.
-Our own hiring is deliberately not searched: it says nothing about them. A caller
-who would rather not be read from public coverage supplies internal material
-instead (`POST /api/briefings/own-company/material`), which reaches the
-recommendation and never becomes evidence about the counterparty.
+**Both sides of a negotiation are read.** The counterparty (B) gets the full
+pipeline. The caller's own company (A) is scanned for **market position only** —
+its quote and the coverage that moved it, over 60 days rather than the 30 a
+counterparty gets, because one month is too short to characterise the trend every
+deal is argued against. Our own hiring is deliberately not searched: it says
+nothing about them. A caller who would rather not be read from public coverage
+supplies internal material instead (`POST /api/briefings/own-company/material`),
+which reaches the recommendation and never becomes evidence.
+
+**The other party named in the objective is read too.** "Buy zipper supplies from
+YKK" needs evidence about YKK as much as about the caller, but every query used to
+carry only the company being briefed — a relationship query returns the briefed
+company's coverage and mentions the supplier in passing. Measured: a brief
+concluded "silent on YKK", which was true and was the pipeline's own fault. The
+objective is now read for the other party's name (`services/counterparty.py`,
+capitalised phrases after *from / with / against / vs / to*), and a lane of
+queries about **that company's own condition** — its revenue, capacity, pricing
+pressure, customer contracts — runs alongside the rest.
 
 Nothing is filtered by sentiment on either side — positive and negative coverage
 are both kept, because a company that only remembers its good news cannot be
@@ -248,11 +260,49 @@ audit, and are marked by source rather than trusted more for having been found.
 
 **Reading.** Hard facts are the opening three paragraphs plus the closing one;
 middle paragraphs contribute their first sentence only when it carries a negative
-signal. A body larger than 12k characters — a 10-K, an IR page — goes through the
-long-document reader, which keeps the sections that answer the meeting objective
-and drops boilerplate. Measured on a filing: 37,863 characters reduced to 836,
-retaining results-of-operations and liquidity, dropping forward-looking statements
-and exhibit indexes.
+signal. Each paragraph is then split into sentences, so one stored fact is one
+statement rather than a bundle — a claim can point at the sentence behind it, and
+a figure cannot hide inside a block nobody can slice. A body larger than 12k
+characters — a 10-K, an IR page — goes through the long-document reader, which
+keeps the sections that answer the meeting objective and drops boilerplate.
+Measured on a filing: 37,863 characters reduced to 836, retaining
+results-of-operations and liquidity, dropping forward-looking statements and
+exhibit indexes.
+
+#### Retrieval limits, and when it stops
+
+Retrieval is bounded four ways. All four are published because a reader has to be
+able to tell "the search converged" from "the search was cut off".
+
+| Bound | Value | What it protects against |
+|---|---|---|
+| Opening round | one per lane, **concurrent** (news, open, LinkedIn, local) | a single query list deciding coverage |
+| Follow-up rounds | `MAX_SEARCH_ROUNDS = 8`, `MAX_EXTRA_QUERIES = 6` per round | a runaway query plan |
+| Wall clock | `SEARCH_BUDGET_SECONDS = 45` | outliving the client's poll window |
+| Diminishing returns | `MAX_STALE_ROUNDS = 2` — two consecutive rounds adding no new URL | paying Tavily for the same results again |
+| Per query | `TAVILY_MAX_RESULTS = 20`, then the publisher filter | an unfiltered result set |
+
+The loop exits on whichever bound is reached first, and it is the **diminishing-returns
+bound that actually fires**. Measured on a real four-lane run (28 planned queries):
+
+| Round | Queries | Usable | New URLs | Running total |
+|---|---|---|---|---|
+| opening (4 lanes) | 11 | 101 | 75 | 75 |
+| 2 | 6 | 4 | **0** | 75 |
+| 3 | 6 | 3 | **2** | 77 |
+| 4 | 6 | 5 | **0** | 77 |
+| 5 | 5 | 0 | **0** | 77 → stop |
+
+So the opening concurrent round produced 75 of the 77 URLs, and the four
+follow-up rounds bought two articles. The round cap and the 45-second budget were
+never reached — the plan ran dry first (`pending_queries=0`). The limits are
+therefore not the constraint on coverage; **the supplied query list is**. That is
+why the planner is asked for queries that name the meeting objective rather than
+generic financial terms, and why the counterparty lane exists.
+
+`MIN_USABLE_PER_ROUND = 1` and `REFILL_MIN_USABLE_RESULTS = 8` are the other two:
+a round counts as productive only when it yields a result that carries an article
+body, and the body-refill round is skipped once enough results already have one.
 
 → Scoping tables, per-publisher body boundaries, depth budgets, body recovery and
 deduplication: **[ENGINEERING.md §3](ENGINEERING.md#3-retrieval)**.
@@ -507,7 +557,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 420 passed.
+Expected: 442 passed.
 
 The gateway policy package ships its own suite, runnable without this backend:
 

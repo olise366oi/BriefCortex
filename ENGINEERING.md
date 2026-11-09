@@ -48,13 +48,14 @@ hallucinated host cannot reach the search API.
 
 ### 3.2 Lanes run concurrently
 
-`services/ingestion.py::_search_plan`. Three lanes open in parallel:
+`services/ingestion.py::_search_plan`. Four lanes open in parallel:
 
 | Lane | Domain scope | Dated | Purpose |
 |---|---|---|---|
-| news | registry categories | yes | reporting |
-| open | none (open web) | no | legal/regulatory, careers |
+| news | registry categories + national press | yes | reporting |
+| open | none (open web) | no | legal/regulatory, careers, **counterparty** |
 | linkedin | `linkedin.com/jobs` | no | postings |
+| local | national press only, in that country's language | yes | national-language reporting |
 
 Measured: sequential 27.73s → parallel 12.20s (−56%). Each lane folds into its
 own list and the lists merge afterwards, so dedup does not depend on which lane
@@ -66,6 +67,44 @@ those lanes can return genuinely old articles, which is why
 `_drop_out_of_window` runs afterwards and removes anything published outside the
 window. Undated results are kept: dropping them would defeat the reason the lane
 exists.
+
+**The counterparty lane.** `services/counterparty.py` reads the meeting objective
+for the other company's name — capitalised phrases after *from / with / against /
+vs / to*, minus a stop list so "from current levels" is not read as a firm called
+Current — and adds queries about **that company's own condition** (revenue,
+capacity, pricing pressure, customer contracts, restructuring) to the open lane. A
+relationship query (`Canada Goose YKK zipper pricing`) returns the briefed company
+and mentions the supplier in passing; measured on a real brief, the supplier side
+was never looked up at all.
+
+### 3.2b Where retrieval stops
+
+Four bounds, whichever fires first. The one that actually fires is diminishing
+returns, not the round cap.
+
+| Bound | Constant | Value |
+|---|---|---|
+| Opening round | — | one concurrent round per lane |
+| Follow-up rounds | `MAX_SEARCH_ROUNDS`, `MAX_EXTRA_QUERIES` | 8 rounds, 6 queries each |
+| Wall clock | `SEARCH_BUDGET_SECONDS` | 45s |
+| Diminishing returns | `MAX_STALE_ROUNDS` | 2 consecutive rounds with no new URL |
+| Per query | `TAVILY_MAX_RESULTS` | 20, then the publisher filter |
+
+Measured on a four-lane run with 28 planned queries:
+
+| Round | Usable | New URLs | Total |
+|---|---|---|---|
+| opening | 101 | 75 | 75 |
+| 2 | 4 | 0 | 75 |
+| 3 | 3 | 2 | 77 |
+| 4 | 5 | 0 | 77 |
+| 5 | 0 | 0 | 77 → stop (`stale_streak=2`) |
+
+The opening round produced 75 of the 77 URLs; the four follow-up rounds bought
+two articles in 33 seconds. The plan ran dry (`pending_queries=0`) before either
+the round cap or the budget was reached. **The constraint on coverage is the
+supplied query list, not these constants** — which is why the planner is asked
+for objective-specific queries and why the counterparty lane was added.
 
 ### 3.3 Reading
 
@@ -225,13 +264,19 @@ one claim whose span is stated.
 
 ## 8. Caching
 
-Three layers, each answering a different question.
+Three layers in the pipeline, plus the gateway. Each answers a different question.
 
-| Layer | Key | Question |
-|---|---|---|
-| `services/cache.py` | company + objective + **meeting day** | is this the same request? |
-| `services/evidence_fingerprint.py` | facts + postings + objective + description + own profile | is this the same brief? |
-| `services/cache_invalidation.py` | cross-set contradiction | may the stored brief still be served? |
+| Layer | Key | Question | Where it is enforced |
+|---|---|---|---|
+| exact request | company + objective + **meeting day** | is this the same request? | `BriefingRepository.find_cached` (field match, not a key string) |
+| evidence fingerprint | facts + postings + objective + description + own profile | is this the same brief? | `services/evidence_fingerprint.py` + `find_by_fingerprint` |
+| invalidation | cross-set contradiction | may the stored brief still be served? | `services/cache_invalidation.py` |
+| gateway | `x-bf-cache-key`, TTL from the evidence | may the model call be replayed? | `services/bifrost_headers.py` |
+
+The request layer is a **field comparison** in the repository, not a hash: the
+record already stores company, purpose and meeting time, so matching those three
+columns is both correct and inspectable (`services/cache.py` holds the key
+primitives and the entry TTL, not the lookup).
 
 The evidence-keyed layer exists because the request layer missed whenever a
 meeting moved by a day, even though nothing about the company had changed. It
@@ -289,7 +334,7 @@ machine that has only psycopg2.
 
 ## 11. Testing
 
-`backend/tests/`, 420 tests, plus `bifrost-cache-policy/tests/`, 74. What they are
+`backend/tests/`, 442 tests, plus `bifrost-cache-policy/tests/`, 74. What they are
 for:
 
 - **Live-run regressions, not invented cases.** Every hiring-filter test uses a

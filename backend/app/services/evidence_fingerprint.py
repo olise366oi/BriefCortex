@@ -22,7 +22,7 @@ window the facts came from, and the facts are already in the fingerprint.
 from __future__ import annotations
 
 import hashlib
-from typing import Sequence
+
 
 from app.models.fact_base import FactBase
 
@@ -63,13 +63,3 @@ def evidence_fingerprint(
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
-
-def section_fingerprint(kind: str, items: Sequence[str]) -> str:
-    """Return a digest for one cached section of a report.
-
-    The analysis and the recommendation are derived from the same facts, so
-    they can be reused independently of whether new facts arrived elsewhere.
-    """
-    body = "\n".join(_canonical(text) for text in sorted(items, key=_canonical))
-    payload = f"{PROMPT_VERSION}|{kind}|{body}"
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
