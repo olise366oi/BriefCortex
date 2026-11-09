@@ -57,9 +57,48 @@ STALE_JOB_MINUTES = 10
 USER_FACING_ERROR = "Brief generation failed. Please try again."
 
 
-def _load_mock_report() -> BriefingReport:
+def _load_mock_report(company_name: str = "") -> BriefingReport:
+    """Return the bundled sample brief, marked as sample data.
+
+    The sample is one fixed report about NIO. Served unchanged, it appeared under
+    any company the caller asked for — a brief for Anthropic and a brief for
+    SpaceX came back with the same NIO paragraph and no indication it was
+    fabricated. A demo dataset has to announce itself: the reader must be able to
+    tell a sample from a finding, and the company the sample describes from the
+    company they asked about.
+    """
     payload = json.loads(MOCK_REPORT_PATH.read_text(encoding="utf-8"))
-    return BriefingReport.model_validate(payload)
+    report = BriefingReport.model_validate(payload)
+
+    asked = " ".join((company_name or "").split())
+    sample_banner = (
+        "SAMPLE DATA — this brief is the bundled demo report about NIO, not a "
+        "reading of the company you asked for."
+    )
+    summary = ""
+    if asked:
+        summary = (
+            f"{sample_banner} You asked about {asked}; the paragraphs below are "
+            "NIO's and are shown so the interface can be exercised. "
+        )
+    else:
+        summary = f"{sample_banner} "
+
+    existing = report.executive_summary
+    marked = existing.model_copy(
+        update={
+            "summary": summary + (existing.summary or ""),
+            "recommendation": (
+                "SAMPLE DATA — do not act on this recommendation."
+                + (" " + existing.recommendation if existing.recommendation else "")
+            ),
+            "confidence": (
+                f"Demo mode: {asked or 'the requested company'} was not researched. "
+                + (existing.confidence or "")
+            ),
+        }
+    )
+    return report.model_copy(update={"executive_summary": marked})
 
 
 def _previous_report_for(
@@ -403,7 +442,7 @@ async def _process_job(briefing_id: uuid.UUID, settings: Settings) -> None:
 
         if settings.MOCK_DATA:
             await asyncio.sleep(settings.MOCK_PROCESSING_DELAY_SECONDS)
-            report = _load_mock_report()
+            report = _load_mock_report(record.company_name)
             evidence = None
         else:
             report, evidence = await _generate_live_report(record, db)

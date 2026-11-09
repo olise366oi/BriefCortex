@@ -17,7 +17,7 @@ from app.services.source_rules import (
 )
 from app.services.long_document import is_long_document, select_relevant
 from app.services.logger_service import get_logger
-from app.services.media_trust import is_refused_host
+from app.services.media_trust import is_refused_host, is_roundup_url
 from app.services.urls import host_of, url_path
 
 logger = get_logger("publisher_filter")
@@ -142,9 +142,16 @@ def filter_results_for_company(
     A refused host is dropped here, before any of the reading work happens: a
     forum thread, a social post or an aggregator of user submissions is not press,
     so it never reaches the fact base regardless of what it says or who links it.
+
+    A multi-company column is dropped for a different reason. "Small caps to
+    watch" is a legitimate page that reports a dozen firms in sequence; the
+    numbers are true and none of them belong to one company, so the sentences
+    cannot be attributed without reading which paragraph is whose. Measured: one
+    such page put seven other companies' figures into one brief.
     """
     kept: List[dict] = []
     refused: List[str] = []
+    roundups = 0
     for result in results:
         if not isinstance(result, dict):
             continue
@@ -155,6 +162,10 @@ def filter_results_for_company(
 
         if is_refused_host(url):
             refused.append(host_of(url))
+            continue
+
+        if is_roundup_url(url):
+            roundups += 1
             continue
 
         if not is_kept_result(url):
@@ -170,6 +181,10 @@ def filter_results_for_company(
             "Non-press hosts refused | count=%s | hosts=%s",
             len(refused),
             sorted(set(refused))[:8],
+        )
+    if roundups:
+        logger.info(
+            "Multi-company roundup columns skipped | count=%s", roundups
         )
 
     return kept

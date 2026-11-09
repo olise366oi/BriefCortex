@@ -92,19 +92,27 @@ def extract_hard_facts(clean_text: str) -> List[str]:
     Paragraphs shorter than MIN_PARAGRAPH_LENGTH are dropped, because Tavily
     markdown contains headings, list items and quote blocks that are
     structurally not paragraphs.
+
+    A paragraph is then split into sentences and each sentence is stored as its
+    own fact. One sentence states one thing; a paragraph states several, and
+    storing the paragraph whole meant a claim built from its third sentence could
+    not be traced to any single stored item, and a figure buried at character 500
+    sat inside one "fact" that no citation could point at. Measured on a live
+    brief: 15 of 78 stored facts bundled three or more distinct statements, and
+    the audit could not verify the claims built from them.
     """
     paragraphs = _paragraphs(clean_text)
     if not paragraphs:
         return []
 
     if len(paragraphs) <= HARD_FACT_HEAD_PARAGRAPHS:
-        return paragraphs
+        return _split_sentences(paragraphs)
 
     lead = paragraphs[:HARD_FACT_HEAD_PARAGRAPHS]
     middle = paragraphs[HARD_FACT_HEAD_PARAGRAPHS:-1]
     tail = paragraphs[-1:]
 
-    hard_texts = [text for text in lead + tail if text]
+    hard_texts = [text for text in _split_sentences(lead + tail)]
 
     negative_texts: List[str] = []
     for paragraph in middle:
@@ -119,6 +127,58 @@ def extract_hard_facts(clean_text: str) -> List[str]:
             break
 
     return hard_texts + negative_texts
+
+
+# A sentence end followed by what starts the next sentence. A run of whitespace
+# after terminal punctuation is what separates sentences in cleaned prose. The
+# lookahead requires a capitalised word, an opening bracket, or a digit followed
+# by a space — not a currency sign, because "C$274.0m. Gross profit" would split
+# inside the figure and "C$274.0m from C$258.8m" would split at the "$".
+_SENTENCE_BOUNDARY = re.compile(
+    r"(?<=[.!?])\s+(?=[A-Z(*]|[0-9]+[A-Za-z]?\.\s)"
+)
+
+# A fragment shorter than this is a table cell, a ticker, or a stray label, not a
+# statement that can be cited on its own.
+MIN_FACT_SENTENCE_CHARS = 40
+
+
+def _split_sentences(paragraphs: List[str]) -> List[str]:
+    """Return one fact per sentence, keeping only sentences that state something.
+
+    A paragraph whose sentences cannot be recovered (a table, a list of tickers)
+    is kept whole rather than shredded into meaningless fragments: structure that
+    has no sentence boundary has no information boundary either.
+    """
+    out: List[str] = []
+    for paragraph in paragraphs:
+        sentences = [
+            " ".join(sentence.split())
+            for sentence in _SENTENCE_BOUNDARY.split(paragraph)
+        ]
+        sentences = [s for s in sentences if s]
+
+        if len(sentences) <= 1:
+            out.append(paragraph.strip())
+            continue
+
+        # A trailing fragment that never became a sentence ("14.") joins the one
+        # before it instead of standing alone. A complete sentence that happens to
+        # be short is kept: "Gross profit rose to C$182.9 million." is a fact and
+        # joining it upward would bury a figure inside another sentence.
+        merged: List[str] = []
+        for sentence in sentences:
+            if (
+                merged
+                and len(sentence) < MIN_FACT_SENTENCE_CHARS
+                and not sentence.endswith((".", "!", "?"))
+            ):
+                merged[-1] = f"{merged[-1]} {sentence}"
+                continue
+            merged.append(sentence)
+
+        out.extend(merged)
+    return out
 
 
 def extract_analyst_opinions(clean_text: str, hard_facts: List[str]) -> List[str]:

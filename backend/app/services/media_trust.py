@@ -148,6 +148,39 @@ def is_refused_host(url_or_host: str) -> bool:
     return any(_matches(host, refused) for refused in REFUSED_HOSTS)
 
 
+# Column shapes that cover several companies in one page. A "small caps to watch"
+# roundup reports a dozen firms' figures in sequence; every sentence is true and
+# none of them can be attributed to the company being briefed without reading
+# which paragraph belongs to whom. Measured: one such page contributed eight
+# facts to a Canada Goose brief, seven of them about other companies (MDA Space's
+# revenue, Savaria's price move, a table of six unrelated tickers), and the
+# opening paragraphs — which is what the subject classifier reads — were about
+# the index rather than about anyone in it.
+#
+# The page is not press misbehaving; it is a format whose numbers have no single
+# owner. Refusing it at the URL is the only cheap way to keep them out.
+ROUNDUP_PATH_MARKERS: Tuple[str, ...] = (
+    "inside-the-market",
+    "small-caps-to-watch",
+    "stocks-to-watch",
+    "market-movers",
+    "what-to-watch",
+    "morning-movers",
+    "midday-movers",
+    "closing-bell",
+    "live-updates",
+    "markets-wrap",
+    "roundup",
+)
+
+
+def is_roundup_url(url_or_host: str) -> bool:
+    """True when the URL is a multi-company column rather than one story."""
+    text = (url_or_host or "").strip().lower()
+    path = text.split("?", 1)[0]
+    return any(marker in path for marker in ROUNDUP_PATH_MARKERS)
+
+
 PUBLIC_SUFFIXES = (
     ".com", ".net", ".org", ".co", ".jp", ".de", ".fr", ".uk", ".cn", ".in",
     ".hk", ".sg", ".my", ".id", ".kr", ".tw", ".th", ".vn", ".au", ".nz",

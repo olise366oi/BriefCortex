@@ -39,6 +39,7 @@ from app.services.company_identity import (
 )
 from app.services.coverage import build_coverage_report
 from app.services.corroboration import corroborate_incidental_facts
+from app.services.counterparty import counterparties, counterparty_queries
 from app.services.dedup import drop_duplicate_facts, merge_duplicate_facts
 from app.services.entity_disambiguation import filter_by_entity
 from app.services.hiring import (
@@ -1026,6 +1027,21 @@ async def ingest_company_data(
         # Hiring runs here too: a careers page is usually on the company's own
         # site, which the publisher registry does not contain by design.
         open_queries = legal_queries(company_label, identity) + hiring_queries(company_label)
+
+        # The other company the objective names gets its own queries. A
+        # relationship query ("Canada Goose YKK zipper pricing") returns the
+        # briefed company's coverage and mentions the supplier in passing, so the
+        # supplier side of a negotiation was never actually looked up: one measured
+        # brief concluded "silent on YKK" because nothing had searched for YKK.
+        partners = counterparties(request.meeting_purpose, company_label)
+        if partners:
+            open_queries.extend(
+                query
+                for partner in partners
+                for query in counterparty_queries(partner)
+            )
+            logger.info("Counterparty lane | named=%s", partners)
+
         linkedin_queries = linkedin_hiring_queries(company_label)
 
         # Queries in the country's own language, scoped to that country's own
