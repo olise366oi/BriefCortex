@@ -190,13 +190,16 @@ class AuditRemoval(BaseModel):
 
     A removed claim is not shown to the reader as a finding, but the reader is
     told that something was removed and why. Silently dropping it would make the
-    brief look cleaner than the evidence allows.
+    brief look cleaner than the evidence allows. The source URL is kept with it:
+    without it a removal cannot be re-checked afterwards, which is exactly what
+    made an over-strict audit impossible to diagnose.
     """
 
     section: str
     claim: str
     verdict: str
     remedy: str
+    source_url: str = ""
 
 
 class BriefingReport(BaseModel):

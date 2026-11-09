@@ -241,6 +241,7 @@ async def generate_briefing_report(
                         claim=entry["claim"],
                         verdict=entry["verdict"],
                         remedy=entry["remedy"],
+                        source_url=entry.get("source_url", ""),
                     )
                     for entry in outcome.removed
                 ]
@@ -288,21 +289,6 @@ async def generate_briefing_report(
             len(audited.changes_since_previous),
         )
         audited = audited.model_copy(update={"changes_since_previous": []})
-    if outcome.removed:
-        audited = audited.model_copy(
-            update={
-                "removed_claims": [
-                    AuditRemoval(
-                        section=entry["section"],
-                        claim=entry["claim"],
-                        verdict=entry["verdict"],
-                        remedy=entry["remedy"],
-                    )
-                    for entry in outcome.removed
-                ]
-            }
-        )
-
     # Facts mined from articles about other companies. They are leads, not
     # findings, so they travel beside the brief rather than inside it.
     if fact_base.incidental_facts:

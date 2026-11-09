@@ -17,7 +17,7 @@ invent an entity, and every field it shows is traceable to a URL.
 from __future__ import annotations
 
 import json
-from typing import List, Optional, Sequence
+from typing import List, Sequence
 
 from pydantic import BaseModel, Field, ValidationError
 from tavily import TavilyClient

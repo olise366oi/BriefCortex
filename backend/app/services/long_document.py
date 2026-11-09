@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import List
 
 from app.services.keywords import match_word
 from app.services.logger_service import get_logger

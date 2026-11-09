@@ -20,9 +20,8 @@ request, which is how a team with several business lines uses the product.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional
 
 from app.services.logger_service import get_logger
 

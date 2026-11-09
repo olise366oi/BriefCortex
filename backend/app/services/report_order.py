@@ -8,8 +8,6 @@ brief is cheaper to enforce than to ask for.
 """
 from __future__ import annotations
 
-from typing import List
-
 from app.models.briefing import BriefingReport, ClaimModule
 
 # No date sorts below every real date: an undated item is not known to be new.

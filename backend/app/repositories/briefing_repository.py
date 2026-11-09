@@ -5,7 +5,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.db.models import (

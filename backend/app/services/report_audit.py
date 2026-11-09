@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Sequence
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -62,6 +62,14 @@ harmful as passing a false one: it empties a correct brief.
 Reply with JSON only:"""
 
 MAX_AUDIT_CLAIMS = 40
+
+# How much of the cited article the auditor is shown, in total. Every fact under
+# the cited URL is included up to this cap: a figure can sit deep inside a long
+# fact (measured: "$497 million" sat past character 300 of a 700-character
+# transcript fact), and a truncated fact reads to the auditor as an article that
+# never states the figure. Bounded so one long transcript cannot dominate the
+# audit prompt.
+MAX_CITED_CHARS = 6000
 
 
 class ClaimVerdict(BaseModel):
@@ -115,20 +123,50 @@ def _cited_evidence(claim, fact_base: FactBase) -> str:
     The auditor is told what that one source actually said, so it can judge
     support against the right sentence rather than against whichever facts
     happened to fit a prompt budget.
+
+    The window is sized to the claim, not fixed. A claim that consolidates
+    several facts from one article states every one of those facts; showing it
+    four of them and truncating each to 300 characters hides the figures the claim
+    is built from, and the auditor then rejects it as "the evidence does not carry
+    this" when the evidence does. Measured on a real brief: seven claims were
+    removed this way, five of them carrying figures that were in the evidence set
+    but outside the window.
+
+    The URL comparison tolerates the query string. Search results are stored with
+    tracking parameters (`?fr=sycsrp_catchall`) and a model echoes the URL it was
+    shown, so an exact-equality test on the full string can miss the article for
+    a trailing `?`.
     """
     url = str(getattr(claim, "source_url", "") or "")
     if not url:
         return "(no source cited)"
 
+    bare = url.split("?", 1)[0].split("#", 1)[0]
     matching = [
         item.content
         for item in list(fact_base.hard_facts) + list(fact_base.hiring)
         + list(fact_base.analyst_opinions)
-        if str(item.source_url) == url
+        if str(item.source_url).split("?", 1)[0].split("#", 1)[0] == bare
     ]
     if not matching:
         return "(source not in evidence)"
-    return " || ".join(text[:300] for text in matching[:6])
+
+    # A claim is at most a few hundred characters in a real brief, so the facts
+    # behind it are few. Every fact under this URL is shown in full: a figure can
+    # sit anywhere inside a fact (measured: one claim's "Baffin" was at character
+    # 595 of a 752-character fact, so a 300-character cap hid it while the fact
+    # itself was visible), and a truncated fact reads to the auditor as an article
+    # that does not state the figure.
+    shown: List[str] = []
+    used = 0
+    for text in matching:
+        if used >= MAX_CITED_CHARS:
+            break
+        remaining = MAX_CITED_CHARS - used
+        shown.append(text[:remaining])
+        used += len(text[:remaining])
+
+    return " || ".join(shown)
 
 
 def _flatten(report: BriefingReport) -> List[tuple[str, int, object]]:
