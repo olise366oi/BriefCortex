@@ -1,4 +1,4 @@
-"""The company's own careers page is probed when no search result produced roles."""
+﻿"""The company's own careers page is probed when no search result produced roles."""
 from __future__ import annotations
 
 import asyncio
@@ -37,7 +37,7 @@ def test_an_unrelated_host_is_not_mistaken_for_the_company():
 def test_the_probe_returns_roles_from_the_first_board_that_answers(monkeypatch):
     tracker = _Tracker()
 
-    def _fake_postings(url: str):
+    def _fake_postings(url: str, _employer: str = ""):
         tracker.urls.append(url)
         if "canadagoose.com/careers" in url:
             return [
@@ -69,7 +69,7 @@ def test_the_probe_returns_roles_from_the_first_board_that_answers(monkeypatch):
 def test_the_probe_stops_at_the_first_board_that_answers(monkeypatch):
     tried: list[str] = []
 
-    def _fake_postings(url: str):
+    def _fake_postings(url: str, _employer: str = ""):
         tried.append(url)
         return [
             JobPosting(
@@ -88,7 +88,7 @@ def test_the_probe_stops_at_the_first_board_that_answers(monkeypatch):
 def test_no_domain_means_no_probe(monkeypatch):
     called: list[str] = []
 
-    def _fake_postings(url: str):
+    def _fake_postings(url: str, _employer: str = ""):
         called.append(url)
         return []
 
@@ -103,7 +103,7 @@ def test_no_domain_means_no_probe(monkeypatch):
 def test_an_unreadable_candidate_moves_on_to_the_next_shape(monkeypatch):
     seen: list[str] = []
 
-    def _fake_postings(url: str):
+    def _fake_postings(url: str, _employer: str = ""):
         seen.append(url)
         if len(seen) == 1:
             raise OSError("connection refused")

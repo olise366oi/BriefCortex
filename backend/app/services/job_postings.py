@@ -187,41 +187,168 @@ NOT_A_POSTING_RE = re.compile(
 MAX_DETAIL_FETCHES = 5
 
 
-def postings_from_html(page_html: str) -> List[JobPosting]:
-    """Extract every JobPosting described by a page's structured data."""
+def postings_from_html(
+    page_html: str,
+    employer: str = "",
+) -> List[JobPosting]:
+    """Extract every posting described by a page's structured data.
+
+    Two shapes are read, because boards publish openings as different structured
+    data:
+
+    * **`JobPosting`** — one object per role, which is what a board's detail page
+      and most vendor indexes use.
+    * **`ItemList`** — an index of roles, each entry carrying a title, a URL and
+      the employer it belongs to. LinkedIn publishes its jobs page this way.
+      Measured: 60 entries, and the entries are a *mix* — a page for "Canada
+      Goose jobs" listed Callaway Golf, Acushnet and Cole Haan alongside three
+      Canada Goose roles, because the index is padded with related listings.
+
+    ``employer`` is what separates those: an `ItemList` entry naming a different
+    employer is dropped, since attributing another company's opening to this one
+    is the failure the subject routing exists to prevent. A `JobPosting` block has
+    no employer field on most boards, so it is not filtered here.
+    """
     found: List[JobPosting] = []
     seen_titles: set[str] = set()
+    wanted = " ".join((employer or "").split()).lower()
 
     for document in _iter_ld_blocks(page_html):
+        # An ItemList holds its roles in `itemListElement`, so each entry is read
+        # as its own posting. Passing the list node itself to the single-entry
+        # reader found no title and silently produced nothing.
         for node in _walk(document):
-            if str(node.get("@type") or "").lower() != "jobposting":
+            kind = str(node.get("@type") or "").lower()
+            if kind == "itemlist":
+                for entry in node.get("itemListElement") or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    posting = _posting_from_itemlist(entry, wanted)
+                    if posting is None or posting.title.lower() in seen_titles:
+                        continue
+                    seen_titles.add(posting.title.lower())
+                    found.append(posting)
+                    if len(found) >= MAX_POSTINGS_PER_PAGE:
+                        return found
                 continue
 
-            title = _strip_html(str(node.get("title") or node.get("name") or ""))
-            if not title or title.lower() in seen_titles:
+            if kind != "jobposting":
                 continue
-
-            description = _strip_html(str(node.get("description") or ""))
-            if len(description) < MIN_DESCRIPTION_CHARS:
-                description = ""
-            else:
-                description = description[:MAX_DESCRIPTION_CHARS].rstrip()
-
-            seen_titles.add(title.lower())
-            found.append(
-                JobPosting(
-                    title=title,
-                    description=description,
-                    location=_location_text(node),
-                    employment_type=_clean_employment_type(node.get("employmentType")),
-                    posted_date=str(node.get("datePosted") or "").strip() or None,
-                )
-            )
-
+            posting = _posting_from_jobposting(node, wanted)
+            if posting is None or posting.title.lower() in seen_titles:
+                continue
+            seen_titles.add(posting.title.lower())
+            found.append(posting)
             if len(found) >= MAX_POSTINGS_PER_PAGE:
                 return found
 
     return found
+
+
+def _posting_from_jobposting(
+    node: dict,
+    wanted_employer: str = "",
+) -> Optional[JobPosting]:
+    title = _strip_html(str(node.get("title") or node.get("name") or ""))
+    if not title:
+        return None
+
+    # A detail page states whose role it is in `hiringOrganization`. When the page
+    # was reached from a mixed index (LinkedIn pads its list with related
+    # employers), the only thing separating our role from Callaway Golf's is this
+    # field. A block that names an employer we are not briefing is dropped; a
+    # block that names none is kept, because most boards omit it on their own
+    # careers pages and those are the employer's by construction.
+    if wanted_employer:
+        hiring = node.get("hiringOrganization")
+        if isinstance(hiring, dict):
+            hiring = hiring.get("name")
+        if hiring:
+            claimed = " ".join(str(hiring).split()).lower()
+            if wanted_employer not in claimed and claimed not in wanted_employer:
+                return None
+
+    description = _strip_html(str(node.get("description") or ""))
+    if len(description) < MIN_DESCRIPTION_CHARS:
+        description = ""
+    else:
+        description = description[:MAX_DESCRIPTION_CHARS].rstrip()
+
+    return JobPosting(
+        title=title,
+        description=description,
+        location=_location_text(node),
+        employment_type=_clean_employment_type(node.get("employmentType")),
+        posted_date=str(node.get("datePosted") or "").strip() or None,
+    )
+
+
+# An ItemList entry names its employer in one of these fields. LinkedIn uses
+# `disambiguatingDescription`; schema.org defines no employer for a list item, so
+# the field is whatever the site chose. `description` is deliberately **not** in
+# this list: LinkedIn puts the *location* there ("Fort Worth, TX"), and reading it
+# as the employer attributed Callaway Golf's roles to Canada Goose.
+_ITEM_LIST_EMPLOYER_FIELDS = (
+    "disambiguatingDescription",
+    "hiringOrganization",
+    "employer",
+)
+
+# An ItemList entry may carry the location in `description`. Only used when it
+# looks like a place rather than an organization name.
+_ITEM_LIST_LOCATION_FIELDS = ("description", "jobLocation")
+
+
+def _item_list_employer(node: dict) -> str:
+    """Return the employer an ItemList entry names, or an empty string."""
+    for field_name in _ITEM_LIST_EMPLOYER_FIELDS:
+        value = node.get(field_name)
+        if isinstance(value, dict):
+            value = value.get("name")
+        if value:
+            text = " ".join(str(value).split())
+            if text:
+                return text
+    return ""
+
+
+def _item_list_location(node: dict) -> Optional[str]:
+    """Return the posting's location from an ItemList entry, if it states one."""
+    for field_name in _ITEM_LIST_LOCATION_FIELDS:
+        value = node.get(field_name)
+        if isinstance(value, dict):
+            value = _location_text(node)
+        if value:
+            text = " ".join(str(value).split())
+            if text:
+                return text
+    return None
+
+
+def _posting_from_itemlist(node: dict, wanted_employer: str) -> Optional[JobPosting]:
+    """Return one posting from an ItemList entry, when it belongs to the employer."""
+    title = _strip_html(str(node.get("name") or node.get("title") or ""))
+    if not title:
+        return None
+
+    employer = _item_list_employer(node)
+    if wanted_employer and employer:
+        # Containment either way, because a page writes "Canada Goose" while a
+        # title writes "Canada Goose Holdings Inc.".
+        if wanted_employer not in employer.lower() and employer.lower() not in wanted_employer:
+            return None
+    elif wanted_employer and not employer:
+        # An entry that names no employer cannot be attributed, so it is dropped
+        # rather than guessed.
+        return None
+
+    return JobPosting(
+        title=title,
+        description="",
+        location=_item_list_location(node),
+        employment_type=None,
+        posted_date=None,
+    )
 
 
 def fetch_page(url: str) -> Optional[str]:
@@ -285,7 +412,7 @@ def _detail_links(page_html: str, base_url: str, limit: int) -> List[str]:
     return links
 
 
-def postings_from_url(url: str) -> List[JobPosting]:
+def postings_from_url(url: str, employer: str = "") -> List[JobPosting]:
     """Fetch a careers page and return the openings it publishes.
 
     Three shapes are handled, in the order that avoids wasted requests:
@@ -314,7 +441,7 @@ def postings_from_url(url: str) -> List[JobPosting]:
     if not page_html:
         return []
 
-    postings = postings_from_html(page_html)
+    postings = postings_from_html(page_html, employer)
     if postings:
         logger.info("Careers page read | url=%s | postings=%s", url, len(postings))
         return postings
@@ -339,7 +466,7 @@ def postings_from_url(url: str) -> List[JobPosting]:
         detail_html = fetch_page(detail_url)
         if not detail_html:
             continue
-        for posting in postings_from_html(detail_html):
+        for posting in postings_from_html(detail_html, employer):
             if posting.title.lower() in seen_titles:
                 continue
             seen_titles.add(posting.title.lower())

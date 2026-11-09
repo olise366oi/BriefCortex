@@ -260,6 +260,17 @@ often lists nothing and links out to its vendor board — measured,
 two absolute Workday URLs. When a careers page yields no postings, the board it
 points at is read instead; that is where the 96 roles came from.
 
+**LinkedIn's jobs index is a job board, and it is padded.** `linkedin.com` is
+refused as a *source of reporting* — a feed post is a claim about a claim — but
+the refusal used to run before the careers test, so the LinkedIn lane returned
+zero usable results on every run. It is now judged first, and its index is read as
+the `ItemList` it actually is rather than as a `JobPosting` it never publishes.
+The index mixes employers: a page for "Canada Goose jobs" carried 60 entries and
+only 40 were Canada Goose, the rest Callaway Golf, Acushnet and Cole Haan. LinkedIn
+names the employer in `disambiguatingDescription` and puts the *city* in
+`description`, so a role is kept only when its employer matches the company being
+briefed.
+
 **A price needs a ticker, and a ticker needs an identity.** The quote is fetched
 from a symbol resolved from the company name (`services/ticker.py`), so a listed
 company no longer depends on the caller typing one — measured, five stored briefs
@@ -267,8 +278,10 @@ for Canada Goose (GOOS on NYSE, GOOS.TO on Toronto) carried no price at all. But
 symbol is not an identity: searching a private group's name answers with symbols
 belonging to unrelated businesses (measured, "YKK" matched two Finnish companies).
 A candidate is accepted only when its registered name matches at the same bar the
-legal-entity registry uses, so an unmatched company has no price rather than
-somebody else's.
+legal-entity registry uses, and the **company's own country decides the venue**:
+Toyota resolves to `7203.T` (Tokyo) rather than `TM` (NYSE), Canada Goose to
+`GOOS.TO`, Zydus to `ZYDUSLIFE.NS`, while a company with no listing — or no
+confident match — has no quote at all rather than somebody else's.
 
 The remaining publications are ranked: filings and newswires (`primary`), the
 company's own national press (`national`), international wires (`global`), then
@@ -619,7 +632,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 517 passed.
+Expected: 533 passed.
 
 The gateway policy package ships its own suite, runnable without this backend:
 

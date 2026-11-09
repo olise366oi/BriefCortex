@@ -655,7 +655,10 @@ async def _route_and_collect(
 
     if careers_entries:
         fetched = await asyncio.gather(
-            *[asyncio.to_thread(postings_from_url, entry["url"]) for entry in careers_entries]
+            *[
+                asyncio.to_thread(postings_from_url, entry["url"], company)
+                for entry in careers_entries
+            ]
         )
         for entry, postings_found in zip(careers_entries, fetched):
             entry["postings"] = postings_found
@@ -1019,7 +1022,7 @@ async def _probe_own_careers(
     for template in CAREERS_URL_SHAPES:
         url = template.format(domain=domain)
         try:
-            postings = await asyncio.to_thread(postings_from_url, url)
+            postings = await asyncio.to_thread(postings_from_url, url, company)
         except Exception as exc:
             logger.info("Careers probe unreadable | url=%s | %s", url, exc)
             continue
@@ -1375,7 +1378,9 @@ async def ingest_company_data(
     if window.needs_fetch:
         ticker = request.ticker.strip()
         if not ticker:
-            match = await asyncio.to_thread(resolve_ticker, company_label)
+            match = await asyncio.to_thread(
+                resolve_ticker, company_label, press_jurisdiction or ""
+            )
             ticker = match.symbol if match else ""
             if ticker:
                 logger.info(

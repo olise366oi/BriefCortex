@@ -15,6 +15,7 @@ from app.services.source_rules import (
     SITE_BODY_RULES,
     SITE_SECTION_RULES,
 )
+from app.services.hiring import is_careers_url
 from app.services.long_document import is_long_document, select_relevant
 from app.services.logger_service import get_logger
 from app.services.media_trust import is_refused_host, is_roundup_url
@@ -158,6 +159,18 @@ def filter_results_for_company(
 
         url = result.get("url")
         if not isinstance(url, str) or not url.strip():
+            continue
+
+        # A job-posting URL is judged before the refused-host list, because two
+        # very different things live on refused hosts: a forum post, and an
+        # employer's own openings. LinkedIn is refused as a source of *reporting*
+        # — a social post is a claim about a claim — but its jobs section is a job
+        # board, which is the one thing that lane exists to read. Measured: the
+        # LinkedIn lane returned zero usable results on every run because every
+        # result was refused before its role was ever looked at.
+        if is_careers_url(url):
+            if mentions_company(result, company_name, aliases):
+                kept.append(result)
             continue
 
         if is_refused_host(url):

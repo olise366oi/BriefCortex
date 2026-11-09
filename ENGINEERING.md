@@ -249,6 +249,34 @@ Measured on Canada Goose: `/careers` returned 404, `/en-us/pages/careers` return
 a Shopify page linking two absolute Workday URLs, and following that link produced
 10 roles (96 on the board).
 
+#### LinkedIn: a job board that is also a refused host
+
+`linkedin.com` is on the refused-host list, and rightly so for reporting: a feed
+post is a claim about a claim. But `is_refused_host` ran **before** the careers
+test, so every LinkedIn result was discarded before its role was read, and the
+LinkedIn lane reported zero usable results on every run.
+
+Three changes were needed, and each was independently fatal:
+
+| Defect | Consequence |
+|---|---|
+| refusal ran first | the whole lane returned nothing |
+| only `JobPosting` was parsed | the index publishes an `ItemList`, so 60 roles parsed as 0 |
+| the index is padded with other employers | a "Canada Goose jobs" page held 60 entries of which 40 were ours; the rest Callaway Golf, Acushnet, Cole Haan |
+
+Careers URLs are now judged before the refused-host list. `postings_from_html`
+reads both shapes, and an `ItemList` is read entry by entry (passing the list node
+itself to the single-entry reader found no title and produced nothing). The
+employer check reads `disambiguatingDescription`; `description` holds the **city**
+("Fort Worth, TX"), and reading it as the employer is what attributed Callaway
+Golf's roles to Canada Goose. A `JobPosting` on a detail page is checked against
+`hiringOrganization` for the same reason — a mixed index links to detail pages that
+belong to other employers.
+
+LinkedIn rate-limits aggressively (measured: HTTP 429 on consecutive requests), so
+the lane is best-effort. It supplements the employer's own board, it is not the
+primary source: a 429 costs the run its LinkedIn roles and nothing else.
+
 ### 3.7 Market quote
 
 `services/market_data.py`, `services/ticker.py`. Yahoo Finance chart endpoint, no
@@ -272,6 +300,21 @@ Non-equity quote types are dropped too: a currency pair (`NIO=X`), a tokenised
 derivative (`SNDK-USD`) and an ETF tracking the stock (`SNDK.TO`) all answer the
 same search and none of them is the share price. An unmatched company therefore
 has **no quote**, rather than somebody else's.
+
+**The company's own country picks the venue.** A large company is listed in
+several places, and the search returns all of them. The jurisdiction from the
+registry decides which one is *its* market (`COUNTRY_SUFFIXES`), so the price
+reported is the one a reader of that company would quote:
+
+| Company | Jurisdiction | Symbol | Without the country |
+|---|---|---|---|
+| Toyota Motor | `JP` | `7203.T` (Tokyo) | `TM` (NYSE) |
+| Canada Goose | `CA-ON` | `GOOS.TO` (Toronto) | `GOOS` (NYSE) |
+| Zydus Lifesciences | `IN` | `ZYDUSLIFE.NS` (NSE) | — |
+
+The name score is rounded before it is compared, so a 0.02 difference in how a
+venue spells the legal name cannot override the venue choice. An unmapped country
+falls back to the generic suffix order rather than refusing every candidate.
 
 ### 3.8 Our own company
 
@@ -432,7 +475,7 @@ machine that has only psycopg2.
 
 ## 11. Testing
 
-`backend/tests/`, 517 tests, plus `bifrost-cache-policy/tests/`, 74. What they are
+`backend/tests/`, 533 tests, plus `bifrost-cache-policy/tests/`, 74. What they are
 for:
 
 - **Live-run regressions, not invented cases.** Every hiring-filter test uses a

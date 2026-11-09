@@ -135,3 +135,82 @@ def test_the_match_carries_its_evidence(monkeypatch):
     assert isinstance(match, TickerMatch)
     assert match.name
     assert match.exchange
+
+
+# --- the company's own venue wins ---------------------------------------
+
+def test_a_japanese_company_is_priced_on_its_own_exchange(monkeypatch):
+    # Toyota lists in Tokyo (7203.T) and in New York (TM). A brief on a Japanese
+    # company is anchored to its own market, not to the depositary line.
+    _patch(
+        monkeypatch,
+        [
+            _quote("TM", "EQUITY", "Toyota Motor Corporation"),
+            _quote("7203.T", "EQUITY", "TOYOTA MOTOR CORP"),
+        ],
+    )
+
+    assert resolve_ticker("Toyota Motor", "JP").symbol == "7203.T"
+
+
+def test_the_same_company_without_a_jurisdiction_falls_back_to_a_bare_symbol(
+    monkeypatch,
+):
+    _patch(
+        monkeypatch,
+        [
+            _quote("TM", "EQUITY", "Toyota Motor Corporation"),
+            _quote("7203.T", "EQUITY", "TOYOTA MOTOR CORP"),
+        ],
+    )
+
+    assert resolve_ticker("Toyota Motor").symbol == "TM"
+
+
+def test_a_canadian_company_is_priced_in_toronto(monkeypatch):
+    _patch(
+        monkeypatch,
+        [
+            _quote("GOOS", "EQUITY", "Canada Goose Holdings Inc."),
+            _quote("GOOS.TO", "EQUITY", "CANADA GOOSE HOLDINGS INC"),
+        ],
+    )
+
+    assert resolve_ticker("Canada Goose", "CA-ON").symbol == "GOOS.TO"
+
+
+def test_a_us_company_prefers_its_bare_symbol(monkeypatch):
+    _patch(
+        monkeypatch,
+        [
+            _quote("NIO", "EQUITY", "NIO Inc."),
+            _quote("NIO.NE", "EQUITY", "NIO Inc."),
+        ],
+    )
+
+    assert resolve_ticker("NIO", "US").symbol == "NIO"
+
+
+def test_an_indian_company_is_priced_on_the_nse(monkeypatch):
+    # Real Yahoo shortnames: NSE writes "ZYDUS LIFESCIENCES LTD", Bombay writes
+    # "Zydus Lifesciences Limited". Both match the name, so the venue decides.
+    _patch(
+        monkeypatch,
+        [
+            _quote("ZYDUSLIFE.BO", "EQUITY", "Zydus Lifesciences Limited"),
+            _quote("ZYDUSLIFE.NS", "EQUITY", "ZYDUS LIFESCIENCES LTD"),
+        ],
+    )
+
+    assert resolve_ticker("Zydus Lifesciences", "IN").symbol == "ZYDUSLIFE.NS"
+
+
+def test_a_venue_unknown_country_does_not_disable_the_lookup(monkeypatch):
+    # An unmapped jurisdiction falls back to the generic order rather than
+    # refusing every candidate.
+    _patch(monkeypatch, [_quote("XYZ", "EQUITY", "Acme Holdings Ltd")])
+
+    match = resolve_ticker("Acme Holdings", "ZZ")
+
+    assert match is not None
+    assert match.symbol == "XYZ"
