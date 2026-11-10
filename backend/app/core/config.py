@@ -16,10 +16,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # clean checkout without anyone copying it first. Machine-level environment
 # variables still override both, because pydantic-settings reads them last.
 ENV_FILES = (
-    Path(__file__).resolve().parents[2] / ".env",
     Path(__file__).resolve().parents[2] / ".env.example",
+    Path(__file__).resolve().parents[2] / ".env",
 )
-ENV_FILE = ENV_FILES[0]
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 
 class Settings(BaseSettings):
