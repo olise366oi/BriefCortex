@@ -1,4 +1,4 @@
-﻿# ENGINEERING.md — how BriefCortex actually works
+# ENGINEERING.md — how BriefCortex actually works
 
 This is the detailed companion to `README.md`. The README describes what the
 product is and how to run it; this document describes how it is built, what each
@@ -370,6 +370,12 @@ concurrent batches, and groups the confirmed pairs with union-find, so a
 transitive chain (A=B, B=C) collapses even when A and C were never compared. The
 fuller telling wins, and the model's failure keeps every fact: a duplicate is
 recoverable, a deleted distinct fact is not.
+
+The merge is started as a task as soon as routing finishes — before the quote,
+the careers probe and the incidental harvest run — so its confirmation calls
+overlap theirs. Merge and corroboration read nothing from each other; running
+them in sequence was pure latency. Date recovery also fetches with 24 concurrent
+requests, since its per-result work is one independent HTTP call.
 
 Before any of that, a **word-overlap screen** drops pairs whose wording barely
 overlaps: comparing 337 facts pairwise is ~56k pairs and ~25s of CPU, and most of

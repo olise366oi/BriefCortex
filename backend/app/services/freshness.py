@@ -1,4 +1,4 @@
-# /backend/app/services/freshness.py
+﻿# /backend/app/services/freshness.py
 """Publication-date parsing, fallback recovery, and reporting-period checks."""
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ DATE_FETCH_TIMEOUT_SECONDS = 4.0
 # Date recovery is one HTTP request per undated result, and the fetches are
 # independent. Five at a time serialised 27 undated results into 17.7 seconds on
 # a measured Wipro run; publishing pages tolerate more than that.
-DATE_FETCH_MAX_CONCURRENCY = 16
+DATE_FETCH_MAX_CONCURRENCY = 24
 
 # A recovery pass is a fallback, not a source of truth: a page that will not
 # answer in this window is left undated, and the window filter already admits

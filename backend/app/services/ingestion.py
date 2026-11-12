@@ -1509,6 +1509,17 @@ async def ingest_company_data(
     # on a Wipro run they cost 15.8s + 15.2s + 18.0s one after another, and none
     # of them reads the others' output.
 
+    # The fact merge depends only on the routed facts — not on the quote, the
+    # careers probe, the incidental harvest or its corroboration. Start it here
+    # so its dedup model calls overlap those stages instead of following them:
+    # measured on a full run, merge and corroboration each cost several seconds
+    # and neither reads the other's output.
+    merge_task: Optional["asyncio.Task"] = None
+    if hard_facts:
+        merge_task = asyncio.create_task(
+            merge_duplicate_facts(hard_facts, protected=len(stored_facts or []))
+        )
+
     quote_item, probed_items, harvested = await asyncio.gather(
         _fetch_quote_fact(request, window, company_label, press_jurisdiction),
         _probe_own_board(window, hiring_items, company_label, fetched, aliases),
@@ -1547,10 +1558,8 @@ async def ingest_company_data(
     # First the fact base itself is merged: the same fact reported by five
     # outlets becomes one entry carrying all five links, and the fuller telling
     # wins because it holds more of the detail.
-    if hard_facts:
-        hard_facts, merge_stats = await merge_duplicate_facts(
-            hard_facts, protected=len(stored_facts or [])
-        )
+    if merge_task is not None:
+        hard_facts, merge_stats = await merge_task
         logger.info(
             "Hard fact merge | before=%s | after=%s",
             merge_stats["considered"],
