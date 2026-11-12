@@ -32,8 +32,35 @@ CANDIDATE_SIMILARITY = 0.6
 # product of the two lengths.
 MAX_CANDIDATES = 20
 
-# Pairs per confirmation request.
-BATCH_SIZE = 12
+# Pairs per confirmation request. Larger batches repeat the system prompt fewer
+# times; a malformed reply costs one batch, so the size stays bounded.
+BATCH_SIZE = 20
+
+# Model verdicts, keyed on the normalised pair. A repeated run meets the same
+# syndicated sentences, and asking again is the same answer at full price while
+# a non-deterministic verdict changes the merged fact set — and with it the
+# evidence fingerprint that decides whether inference runs at all.
+MAX_VERDICT_CACHE = 4096
+_VERDICT_CACHE: dict[tuple[str, str], bool] = {}
+
+
+def _pair_key(left: str, right: str) -> tuple[str, str]:
+    """Order-independent cache key for one candidate pair."""
+    a, b = normalize(left), normalize(right)
+    return (a, b) if a <= b else (b, a)
+
+
+def clear_verdict_cache() -> None:
+    """Forget cached verdicts (tests, or a deliberate fresh start)."""
+    _VERDICT_CACHE.clear()
+
+
+def _remember_verdict(key: tuple[str, str], same: bool) -> None:
+    if len(_VERDICT_CACHE) >= MAX_VERDICT_CACHE:
+        # Plain FIFO eviction: verdicts are cheap to recompute and a bounded
+        # dict is all this cache needs to be.
+        _VERDICT_CACHE.pop(next(iter(_VERDICT_CACHE)))
+    _VERDICT_CACHE[key] = same
 
 # Confirmation batches run concurrently. Each batch is an independent model call,
 # so waiting for one before starting the next is pure latency: measured on a
@@ -241,13 +268,31 @@ async def confirm_same_facts(
     Batches are independent calls, so they run concurrently: a run with 172
     facts had enough candidate pairs that confirming them one batch at a time
     was most of the request's wall clock.
+
+    Verdicts are cached across runs, keyed on the normalised pair: a repeated
+    run meets the same syndicated sentences, and a cached answer both saves the
+    call and keeps the merge result stable between runs.
     """
     if not pairs:
         return []
 
+    confirmed: List[CandidatePair] = []
+    pending: List[CandidatePair] = []
+    for pair in pairs:
+        key = _pair_key(existing[pair.existing_index], incoming[pair.incoming_index])
+        verdict = _VERDICT_CACHE.get(key)
+        if verdict is True:
+            confirmed.append(pair)
+        elif verdict is None:
+            pending.append(pair)
+
+    if not pending:
+        logger.info("Fact dedup | verdicts reused from cache | pairs=%s", len(confirmed))
+        return confirmed
+
     batches = [
-        pairs[start : start + BATCH_SIZE]
-        for start in range(0, len(pairs), BATCH_SIZE)
+        pending[start : start + BATCH_SIZE]
+        for start in range(0, len(pending), BATCH_SIZE)
     ]
 
     semaphore = asyncio.Semaphore(CONFIRM_CONCURRENCY)
@@ -279,16 +324,23 @@ async def confirm_same_facts(
                 logger.warning("Semantic dedup unavailable, keeping all | %s", exc)
                 return []
 
-        confirmed: List[CandidatePair] = []
+        confirmed_batch: List[CandidatePair] = []
         for verdict in verdicts.pairs:
-            if not verdict.same:
+            if not 0 <= verdict.index < len(batch):
                 continue
-            if 0 <= verdict.index < len(batch):
-                confirmed.append(batch[verdict.index])
-        return confirmed
+            pair = batch[verdict.index]
+            _remember_verdict(
+                _pair_key(
+                    existing[pair.existing_index], incoming[pair.incoming_index]
+                ),
+                verdict.same,
+            )
+            if verdict.same:
+                confirmed_batch.append(pair)
+        return confirmed_batch
 
     results = await asyncio.gather(*[confirm_batch(batch) for batch in batches])
-    return [pair for batch_confirmed in results for pair in batch_confirmed]
+    return confirmed + [pair for batch in results for pair in batch]
 
 
 async def merge_duplicate_facts(

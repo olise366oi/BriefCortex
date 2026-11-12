@@ -28,7 +28,7 @@ from app.models.fact_base import FactBase
 
 # Bumped when the report schema or the prompt changes materially. A cached brief
 # written by an older pipeline must not be served as if it were current.
-PROMPT_VERSION = "2026-11-05.1"
+PROMPT_VERSION = "2026-11-12.1"
 
 
 def _canonical(text: str) -> str:

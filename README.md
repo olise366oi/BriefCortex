@@ -447,7 +447,38 @@ and the gateway stores, serves and expires them. Verified against a stock
 `x-bifrost-cache-hit=false`, identical second request `true`, refreshed evidence
 `false` again.
 
-### 8. Tested, Not Vibes
+### 8. What a Brief Costs
+
+Token cost is measured, not guessed. Every model call reports the provider's
+`usage`, accumulated per briefing and logged once when the job ends:
+
+```text
+Briefing token usage | id=… | calls=… | prompt_tokens=… | completion_tokens=… | total_tokens=…
+```
+
+Three properties keep the bill down, and each is a deliberate trade-off:
+
+- **The findings stage reads a bounded slice of the evidence.** It returns at
+  most eight claims, so a run with 170 facts ships the newest 80
+  (`MAX_FINDINGS_FACTS`; `0` disables the cap) and `<COVERAGE>` states
+  `facts shown: 80 of 170`. The prompt tells the model never to read a truncated
+  list as the whole record.
+- **Dedup verdicts are cached across runs.** The same pair of syndicated
+  sentences is answered once; a cached verdict also keeps the merged fact set
+  stable, which is what lets the evidence fingerprint hit on a later run.
+- **Cache misses are named.** `Request cache miss … reason=no record|expired`
+  and `Evidence-set cache miss …` make the hit rate explainable from the log
+  instead of an unexplained bill.
+
+Misses themselves are reduced in three places: the request cache (same company,
+objective and meeting day), the evidence fingerprint (same facts, whatever the
+meeting date), and the gateway request cache. The gateway layer is **opt-in**:
+`bifrost/config.json` in this repository ships `plugins: []`, so L4 replays
+nothing until `semantic_cache` is enabled (direct mode, `dimension: 1`, with a
+vector store). The enabling recipe is in the
+[policy package README](bifrost-cache-policy/README.md).
+
+### 9. Tested, Not Vibes
 
 The repo ships with `pytest` coverage for the prompt/schema contract, the conflict engine, the extraction rules and the cache classifier, including:
 
@@ -461,6 +492,7 @@ The repo ships with `pytest` coverage for the prompt/schema contract, the confli
 - A deduplicated chain collapses transitively, the fuller telling wins, every source survives, and nothing merges without the model's confirmation.
 - Subject routing and semantic deduplication are asserted to run their batches concurrently, and a failed subject batch degrades only that batch.
 - The process-wide model-call cap bounds total in-flight calls, and a failed call returns its slot.
+- Findings truncation keeps the newest facts and discloses the ratio; dedup verdicts are reused across runs; per-run token usage is summed from the provider's own report.
 - The cache TTL classifies evidence by whole word, so `third quarter` is not read as a hiring signal.
 
 ---
@@ -539,6 +571,7 @@ BriefCortex/
 | `services/conflict_detection.py` | Deterministic in-report conflict lane, on the shared rule table |
 | `services/bifrost_headers.py` | Content-aware cache headers, wrapping the standalone policy package |
 | `services/llm_client.py` | Provider selection, retry policy, the cached client every caller shares, and the process-wide model-call cap |
+| `services/token_usage.py` | Per-run token accounting, summed from each call's reported `usage` |
 | `services/keywords.py`, `urls.py`, `window.py` | Shared matchers, URL parsing, meeting-anchored window |
 | `services/tavily_search.py` | The single search call, dated and undated, plus targeted body extraction |
 | `services/logger_service.py` | Structured logging factory |
@@ -621,7 +654,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 653 passed.
+Expected: 667 passed.
 
 The gateway policy package ships its own suite, runnable without this backend:
 

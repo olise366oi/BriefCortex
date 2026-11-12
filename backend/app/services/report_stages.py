@@ -25,6 +25,7 @@ Two properties follow from this, and both are the point:
 """
 from __future__ import annotations
 
+import os
 from typing import List, Optional, Sequence
 
 from pydantic import BaseModel, Field
@@ -42,6 +43,13 @@ from app.services.logger_service import get_logger
 
 logger = get_logger("report_stages")
 
+# The findings stage returns at most eight claims, so it does not need every
+# fact ever collected. A busy run produces 170+ facts; shipping all of them is
+# most of the prompt and most of the cost, while the model can only use a
+# handful. Over-budget runs keep the most recent facts and disclose the ratio in
+# <COVERAGE>, so a truncated list is never mistaken for the whole record.
+MAX_FINDINGS_FACTS = int(os.getenv("MAX_FINDINGS_FACTS", "80"))
+
 
 # =============================================================================
 # Prompts
@@ -51,6 +59,10 @@ FINDINGS_PROMPT = """You extract what a company has actually done. You are not
 asked for judgement: another stage forms that, from what you produce.
 
 You receive evidence about one company and output two lists.
+
+The evidence may be a truncated slice of everything collected: <COVERAGE> states
+how many facts you are shown. Never treat a truncated list as the whole record,
+and never infer that an unshown event did not happen.
 
 news — every reported development about the company. Launches, partnerships,
 funding, executive changes, regulatory actions and deterioration all belong here.
@@ -206,6 +218,24 @@ class RecommendationStage(BaseModel):
 # Input rendering
 # =============================================================================
 
+def _select_findings_facts(fact_base: FactBase) -> tuple[List, int]:
+    """Return (facts to send, total collected), newest first when truncating."""
+    facts = list(fact_base.hard_facts)
+    total = len(facts)
+    if MAX_FINDINGS_FACTS <= 0 or total <= MAX_FINDINGS_FACTS:
+        return facts, total
+
+    ordered = sorted(
+        facts,
+        key=lambda item: (
+            item.publish_date.timestamp() if item.publish_date else 0.0,
+            item.content,
+        ),
+        reverse=True,
+    )
+    return ordered[:MAX_FINDINGS_FACTS], total
+
+
 def render_findings_input(
     fact_base: FactBase,
     meeting_purpose: str,
@@ -220,6 +250,9 @@ def render_findings_input(
     re-read. The assessment and recommendation write themselves from scratch in
     stages 2 and 3, so passing the old judgement any further would let it anchor
     the new reading.
+
+    The fact list is capped at ``MAX_FINDINGS_FACTS`` (newest first) because the
+    stage returns at most eight claims; the cap is disclosed in ``<COVERAGE>``.
     """
     lines: List[str] = []
     if company:
@@ -231,10 +264,11 @@ def render_findings_input(
     )
     lines.append("")
 
+    selected, total = _select_findings_facts(fact_base)
     lines.append("<HARD_FACTS>")
-    if not fact_base.hard_facts:
+    if not selected:
         lines.append("(none)")
-    for index, item in enumerate(fact_base.hard_facts, 1):
+    for index, item in enumerate(selected, 1):
         date = item.publish_date.date().isoformat() if item.publish_date else "undated"
         lines.append(f"[H{index}] date={date} ({item.source_url}) {item.content}")
     lines.append("</HARD_FACTS>")
@@ -252,6 +286,7 @@ def render_findings_input(
     coverage = fact_base.coverage
     lines.append(f"level: {coverage.level}")
     lines.append(f"facts collected: {coverage.total_facts}")
+    lines.append(f"facts shown: {len(selected)} of {total}")
     lines.append(f"distinct sources: {coverage.distinct_sources}")
     if coverage.lanes_missing:
         lines.append(f"lanes that returned nothing: {', '.join(coverage.lanes_missing)}")

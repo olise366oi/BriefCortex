@@ -466,6 +466,24 @@ identical second request `true`, refreshed evidence or objective `false` again.
 `bifrost/config.json` in this repository therefore leaves the plugin disabled;
 enabling it is a deployment decision, documented in the package README.
 
+**What a brief costs.** Every call reports the provider's `usage`, which
+`services/token_usage.py` accumulates per briefing (a ContextVar, so concurrent
+tasks report into the same totals) and the job logs once:
+
+```text
+Briefing token usage | id=… | calls=… | prompt_tokens=… | completion_tokens=… | total_tokens=…
+```
+
+The findings prompt is the largest single input because it carries the hard
+facts. It is bounded by `MAX_FINDINGS_FACTS` (default 80, `0` disables): newest
+facts first, and the ratio is disclosed as `facts shown: X of Y` so truncation
+cannot be read as absence of news. Dedup verdicts are cached on the normalised
+pair, so a repeated run neither pays for the same confirmation twice nor changes
+the merged fact set — a changed set would change the evidence fingerprint and
+force regeneration. Misses are logged with their reason (`Request cache miss …
+reason=…`, `Evidence-set cache miss …`), which is what makes a hit rate
+explainable instead of an unexplained bill.
+
 ## 9. LLM access
 
 `services/llm_client.py`. One cached client per `(provider, model, key, base_url)`.
@@ -486,6 +504,11 @@ provider sees their sum. The limiter is created per event loop, because tests an
 one-shot CLIs run several loops in one process and an asyncio primitive from a
 previous loop fails on the next one.
 
+Token accounting lives in the same wrapper rather than in each caller: the
+wrapper reads `response.usage` and records it, and `_process_job` opens one
+collector per briefing. A call made outside a briefing (a test, a probe script)
+records nothing and costs no bookkeeping.
+
 ## 10. Configuration
 
 `core/config.py`. `.env` wins over `.env.example`, and real environment variables
@@ -496,7 +519,7 @@ which needs libpq and fails at import on a machine that has only psycopg2.
 
 ## 11. Testing
 
-`backend/tests/`, 653 tests, plus `bifrost-cache-policy/tests/`, 74 collected (68
+`backend/tests/`, 667 tests, plus `bifrost-cache-policy/tests/`, 74 collected (68
 pass, 6 live cases skipped unless `BIFROST_URL` is set). What they are for:
 
 - **Live-run regressions, not invented cases.** Every hiring-filter test uses a
