@@ -14,7 +14,7 @@ social links, hashtags, generated summaries — is furniture and is dropped.
 from __future__ import annotations
 
 import re
-from typing import List
+from typing import List, Tuple
 
 from app.services.keywords import match_word
 
@@ -258,6 +258,71 @@ def is_careers_url(url: str) -> bool:
             return True
 
     return False
+
+
+# A third-party job board. It reads like a careers page — every path segment says
+# "jobs" — but the postings are not the company's own: an aggregator rewrites
+# every listing into its own template ("Wipro3.672314 Reviews 0 Yrs Navi Mumbai
+# Job description…"), so nothing on it is a statement the employer made.
+#
+# `is_careers_url` deliberately accepts these, because an employer's own
+# openings on an ATS are exactly what the hiring lane wants. The distinction
+# that matters is *who published it*: an ATS host is the employer's board, an
+# aggregator is a marketplace. Measured on Wipro: two Naukri listings and one
+# "how to apply for Wipro jobs" page put thirteen template lines into the
+# hard-fact lane, while its own careers page contributed none.
+JOB_BOARD_HOSTS: Tuple[str, ...] = (
+    "naukri.com",
+    "foundit.in",
+    "monsterindia.com",
+    "shine.com",
+    "timesjobs.com",
+    "hirist.com",
+    "instahyre.com",
+    "cutshort.io",
+    "wellfound.com",
+    "angel.co",
+    "dice.com",
+    "careerbuilder.com",
+    "simplyhired.co.in",
+    "hiringstores.com",
+    "jobscan.co",
+    "jobstreet.com",
+    "jobsdb.com",
+    "seek.com.au",
+    "reed.co.uk",
+    "totaljobs.com",
+    "cv-library.co.uk",
+)
+
+
+def is_job_board(url: str) -> bool:
+    """True when the postings on this page were published by an aggregator.
+
+    The employer's own careers site and its applicant-tracking system are not
+    aggregators: the first is the company's own page, the second is the
+    company's own listings reached through a vendor's front end.
+    """
+    if not url:
+        return False
+    host = url_host(url)
+    if not host:
+        return False
+    return any(host == known or host.endswith("." + known) for known in JOB_BOARD_HOSTS)
+
+
+def url_host(url: str) -> str:
+    """Return the bare lowercase host of a URL."""
+    lowered = (url or "").strip().lower()
+    for separator in ("?", "#"):
+        if separator in lowered:
+            lowered = lowered.split(separator, 1)[0]
+    if "//" in lowered:
+        lowered = lowered.split("//", 1)[1]
+    host = lowered.split("/", 1)[0].split(":")[0]
+    if host.startswith("www."):
+        host = host[len("www."):]
+    return host
 
 
 def is_hiring_line(text: str) -> bool:

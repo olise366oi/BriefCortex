@@ -352,7 +352,18 @@ _FILING_BOILERPLATE_RE = re.compile(
 _PAGE_FOOTER_RE = re.compile(
     r"(©\s*\d{4}|copyright\s+©|all rights reserved|terms (of use|& conditions)|"
     r"privacy policy|cookie (settings|policy)|ad choices|site map|"
-    r"accessibility statement|do not sell my|subscribe to our newsletter)",
+    r"accessibility statement|do not sell my|subscribe to our newsletter|"
+    # A stock-statistics page explains its own ratios in prose, and those
+    # explanations are not facts about the company: measured on Wipro,
+    # "Earnings per share (TTM) tells the profit after tax earned on a per share
+    # basis by a stock over…" and "higher the dividend yield of the stock, the
+    # better it is for investors" both reached the fact base.
+    r"dividend yield calculates|earnings per share \(ttm\) tells|"
+    r"price to book represents|volume weighted average price represents|"
+    r"is a ratio arrived at by dividing|trailing twelve months\) adjusted|"
+    r"higher the dividend yield|should not be interpreted as investment advice|"
+    r"investments in securities are subject to market risks|"
+    r"indicative and should not be interpreted)",
     re.IGNORECASE,
 )
 
@@ -420,7 +431,25 @@ def is_structural_noise(text: str) -> bool:
     if _RECRUITMENT_AD_RE.search(stripped):
         return True
 
+    if _STOCK_TICKER_RE.search(stripped):
+        return True
+
     return False
+
+
+# A live price ticker strip: a company name, a number, a percentage and a clock.
+# Publishers embed one under every article, and it reached the fact base as
+# "IRFC Share Price85.32-30.8% 02:47 PM | 12 Nov 2026-1.39(-1.6%)Upside Suzlon
+# Energy Share Price38.65 45.8% …" on a measured Wipro run. Nine of 267 facts
+# were these strips, and they say nothing about the company being briefed.
+_STOCK_TICKER_RE = re.compile(
+    r"(share\s+price\?*\s*[\d.,]+\s*[-+]?[\d.]+%)"
+    r"|(\d{1,2}:\d{2}\s*(?:AM|PM)\s*\|[^|]{0,20}?\d{1,2}\s+\w{3}\s+20\d\d)"
+    r"|(\d{1,2}:\d{2}:\d{2}\s*(?:AM|PM)\s*IST)"
+    r"|(data\s+points\s+(?:are|were)\s+updated)"
+    r"|(price\s*[\d.,]+\s*[-+]\s*[\d.]+\s*\()",
+    re.IGNORECASE,
+)
 
 
 def _has_sentence(text: str) -> bool:

@@ -4,11 +4,12 @@
 Naming the company is not the same as being about the company: a story on
 Commerzbank's valuation will mention UniCredit and still be Commerzbank's story.
 Routing an article by "did the name appear" therefore files other companies'
-reporting as ours. This module asks the model once, for the whole batch, and
-routes each article by the answer.
+reporting as ours. This module asks the model per batch of excerpts and routes
+each article by the answer.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import List, Literal, Sequence
@@ -44,6 +45,17 @@ Reply with JSON only:
 {"items": [{"index": 0, "subject": "primary|comparison|unrelated"}]}"""
 
 SubjectKind = Literal["primary", "comparison", "unrelated"]
+
+# Excerpts per classifier call. One call carrying a hundred articles is a single
+# request whose latency grows with the batch: measured on a Wipro run, routing
+# plus extraction took 60 seconds, and the model call inside it was the largest
+# single contributor. Batches also let a malformed reply cost one batch instead
+# of every article in the run.
+SUBJECT_BATCH_SIZE = 20
+
+# Batches run concurrently. They are independent — each index appears in exactly
+# one batch — so serialising them buys nothing.
+SUBJECT_CONCURRENCY = 6
 
 
 class SubjectItem(BaseModel):
@@ -91,12 +103,8 @@ async def classify_article_subjects(
     if not name:
         return [ArticleRoute(index=i, subject="unrelated") for i in range(len(openings))]
 
-    numbered = "\n\n".join(
-        f"[{index}] {text.strip()[:400]}"
-        for index, text in enumerate(openings)
-        if text and text.strip()
-    )
-    if not numbered:
+    has_content = any(text and text.strip() for text in openings)
+    if not has_content:
         return [ArticleRoute(index=i, subject="unrelated") for i in range(len(openings))]
 
     described = " ".join((description or "").split())
@@ -104,29 +112,59 @@ async def classify_article_subjects(
     if described:
         context += f"\nCALLER'S DESCRIPTION OF THAT COMPANY: {described}"
 
-    try:
-        client, model = build_client()
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": SUBJECT_PROMPT},
-                {"role": "user", "content": f"{context}\n\nEXCERPTS:\n{numbered}"},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.0,
-        )
-        content = response.choices[0].message.content or ""
-        batch = SubjectBatch.model_validate(json.loads(content))
-    except Exception as exc:
-        logger.warning(
-            "Article subject classification unavailable, treating all as comparison | %s",
-            exc,
-        )
-        return [
-            ArticleRoute(index=i, subject="comparison") for i in range(len(openings))
-        ]
+    # Indexed excerpts, split into batches so one call does not carry the whole
+    # run. Each batch keeps the original indices, so the routes still line up
+    # with the caller's list.
+    indexed = [
+        (index, text.strip()[:400])
+        for index, text in enumerate(openings)
+        if text and text.strip()
+    ]
+    batches = [
+        indexed[start : start + SUBJECT_BATCH_SIZE]
+        for start in range(0, len(indexed), SUBJECT_BATCH_SIZE)
+    ]
 
-    by_index = {item.index: item.subject for item in batch.items}
+    semaphore = asyncio.Semaphore(SUBJECT_CONCURRENCY)
+
+    async def classify_batch(batch: Sequence[tuple[int, str]]) -> dict[int, SubjectKind]:
+        numbered = "\n\n".join(f"[{index}] {text}" for index, text in batch)
+        user_message = f"{context}\n\nEXCERPTS:\n{numbered}"
+
+        async with semaphore:
+            try:
+                client, model = build_client()
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": SUBJECT_PROMPT},
+                        {"role": "user", "content": user_message},
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.0,
+                )
+                content = response.choices[0].message.content or ""
+                parsed = SubjectBatch.model_validate(json.loads(content))
+            except Exception as exc:
+                logger.warning(
+                    "Article subject classification unavailable for a batch, "
+                    "treating those excerpts as comparison | %s",
+                    exc,
+                )
+                return {}
+
+        valid = {index for index, _text in batch}
+        return {
+            item.index: item.subject
+            for item in parsed.items
+            if item.index in valid
+        }
+
+    per_batch = await asyncio.gather(*[classify_batch(batch) for batch in batches])
+    by_index: dict[int, SubjectKind] = {}
+    for mapping in per_batch:
+        by_index.update(mapping)
+
     routes = [
         ArticleRoute(index=index, subject=by_index.get(index, "comparison"))
         for index in range(len(openings))

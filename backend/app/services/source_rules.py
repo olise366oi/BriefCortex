@@ -15,6 +15,39 @@ JUNK_URL_PATHS = (
     "/key-details",
     "/analytics",
     "/company/",
+    # A stock-statistics landing page. It carries the ticker's PE ratio, VWAP
+    # and dividend yield in a table, plus boilerplate explaining what each
+    # ratio means — and its "opening paragraphs" are whatever the site last
+    # published, so the subject classifier reads it as a page about the company
+    # and every ratio becomes a fact. Measured on Wipro: 23 of 267 hard facts
+    # came from `economictimes.indiatimes.com/<company>/stocks/companyid-*.cms`,
+    # including "Investments in securities are subject to market risks".
+    "/stocks/companyid-",
+    "/stocks/companyid",
+    # A publisher's own topic and company hubs, which are an index of its
+    # coverage rather than a story. Measured: 32 of Wipro's 267 hard facts came
+    # from `/topic/...` pages, carrying other companies' layoffs and a live
+    # price ticker.
+    "/topic/",
+    "/topics/",
+    "/tag/",
+    "/tags/",
+    # A "about the company" page is a directory entry: address, phone, sector.
+    "/about/",
+    # A live share-price blog. It reprints a company's regulatory filings under
+    # a "Share Price Live Updates" heading and stamps every block with a
+    # timestamp, so its "opening paragraphs" are quote ticks rather than
+    # reporting. Measured on Wipro: five facts from one such page, including
+    # "The data points are updated as on 03:40:13 PM IST, 12 Nov 2026".
+    #
+    # Deliberately "stock-page" and "share-price-page" rather than a bare
+    # "/markets/stocks/": that directory also carries real articles, and
+    # matching it dropped a Canada Goose press release in the same run.
+    "/stock-liveblog/",
+    "/stock-live/",
+    "/price-live/",
+    "/share-price-live/",
+    "/stock-page/",
 )
 
 MIN_CLEAN_TEXT_LENGTH = 100

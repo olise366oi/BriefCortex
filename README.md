@@ -279,6 +279,28 @@ able to tell "the search converged" from "the search was cut off".
 | Diminishing returns | `MAX_STALE_ROUNDS = 2` — two consecutive rounds adding no new URL | paying Tavily for the same results again |
 | Per query | `TAVILY_MAX_RESULTS = 20`, then the publisher filter | an unfiltered result set |
 
+**The 45-second budget bounds the search loop, not the request.** Everything the
+pipeline does after retrieval — publish-date recovery, subject routing, the
+own-careers probe, the incidental harvest and its corroboration, semantic
+deduplication — used to run one stage after another, so a 172-fact run spent 523
+seconds inside ingestion alone against a 180-second client poll window. Two
+changes cut that to 229 seconds on the same company:
+
+- **Semantic dedup went from 335s to 37s.** The merge walked one fact at a time
+  and asked the model about its partners, then re-asked about the remainder
+  after every accept — one model round per accepted fact. Candidate pairs do not
+  depend on merge order, so they are now proposed once across the whole set,
+  confirmed in concurrent batches, and grouped by union-find.
+- **Three stages that never read each other now run together.** The quote, the
+  own-careers probe and the incidental harvest all depend only on what retrieval
+  already produced; run in sequence they cost 15.8 + 15.2 + 18.0 seconds.
+  Body extraction moved to a worker pool at the same time, because
+  markdown → trafilatura → plain-text rebuild is CPU-bound and running it inline
+  blocked the event loop for the whole reading stage.
+
+What is left is latency, not slack: the search round (50s), the reading stage
+(60s), and one model call per dedup/audit batch at 7–15 seconds each.
+
 The loop exits on whichever bound is reached first, and it is the **diminishing-returns
 bound that actually fires**. Measured on a real four-lane run (28 planned queries):
 

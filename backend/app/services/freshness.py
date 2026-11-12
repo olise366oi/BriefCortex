@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -14,8 +15,16 @@ from app.services.urls import url_path
 
 logger = get_logger("freshness")
 
-DATE_FETCH_TIMEOUT_SECONDS = 6.0
-DATE_FETCH_MAX_CONCURRENCY = 5
+DATE_FETCH_TIMEOUT_SECONDS = 4.0
+# Date recovery is one HTTP request per undated result, and the fetches are
+# independent. Five at a time serialised 27 undated results into 17.7 seconds on
+# a measured Wipro run; publishing pages tolerate more than that.
+DATE_FETCH_MAX_CONCURRENCY = 16
+
+# A recovery pass is a fallback, not a source of truth: a page that will not
+# answer in this window is left undated, and the window filter already admits
+# undated results. Bounding the pass keeps one slow host from holding the brief.
+DATE_RECOVERY_BUDGET_SECONDS = 20.0
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -366,16 +375,23 @@ async def resolve_publish_dates(results: List[dict]) -> List[dict]:
     )
 
     semaphore = asyncio.Semaphore(DATE_FETCH_MAX_CONCURRENCY)
+    started_at = time.monotonic()
 
     async def fill(result: dict) -> None:
         url = str(result.get("url") or "")
         if not url:
             return
-        async with semaphore:
-            recovered = await asyncio.to_thread(date_from_url, url)
+        if time.monotonic() - started_at > DATE_RECOVERY_BUDGET_SECONDS:
+            # The budget ran out while this result was queued: leave it undated
+            # rather than hold the brief for a page that is not answering.
+            return
+
+        # The document's own stamp first: it costs nothing and a filing states
+        # its date in its header and nowhere else.
+        recovered = date_from_body(str(result.get("raw_content") or ""))
         if recovered is None:
-            # A filing states its own date and often nowhere else.
-            recovered = date_from_body(str(result.get("raw_content") or ""))
+            async with semaphore:
+                recovered = await asyncio.to_thread(date_from_url, url)
         if recovered is not None:
             result["published_date"] = recovered.isoformat()
             logger.info("Date recovered | url=%s | %s", url, recovered.date())
@@ -386,8 +402,9 @@ async def resolve_publish_dates(results: List[dict]) -> List[dict]:
         1 for result in missing if parse_publish_date(result.get("published_date")) is None
     )
     logger.info(
-        "Date fallback complete | recovered=%s | still_missing=%s",
+        "Date fallback complete | recovered=%s | still_missing=%s | elapsed=%.1fs",
         len(missing) - still_missing,
         still_missing,
+        time.monotonic() - started_at,
     )
     return results

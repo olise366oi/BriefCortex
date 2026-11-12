@@ -182,6 +182,26 @@ ROUNDUP_PATH_MARKERS: Tuple[str, ...] = (
     "live-updates",
     "markets-wrap",
     "roundup",
+    # Sector and index columns. A "Nifty IT index surges" piece reports a dozen
+    # firms in sequence — "Coforge gained over 4%, Wipro and Persistent about 3%
+    # and 2%, and Infosys more than 2%" — so the sentences about the briefed
+    # company sit among sentences about its peers, and the page's opening
+    # paragraphs, which is what the subject classifier reads, are about the
+    # index. Measured on Wipro: two such columns put twelve peers' figures into
+    # the fact base and produced four false headcount conflicts.
+    "stocks-crash",
+    "stocks-rebound",
+    "stocks-surge",
+    "stocks-fall",
+    "stocks-rally",
+    "stock-market-news",
+    "it-stocks",
+    "index-surges",
+    "index-rises",
+    "index-falls",
+    "index-slips",
+    "sectoral",
+    "nifty-it",
 )
 
 

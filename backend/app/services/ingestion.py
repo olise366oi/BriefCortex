@@ -12,7 +12,7 @@ from typing import List, Optional, Tuple
 from pydantic import ValidationError
 
 from app.models.briefing import BriefingRequest
-from app.models.fact_base import CoverageRecord, FactBase, FactItem
+from app.models.fact_base import CoverageRecord, FactBase, FactItem, IncidentalFact
 from app.services.fact_extraction import (
     dedup_key,
     extract_analyst_opinions,
@@ -111,6 +111,11 @@ REFILL_MIN_USABLE_RESULTS = 8
 # A career page line shorter than this is a label ("Careers", "Filter by")
 # rather than a role worth reading.
 MIN_POSTING_LINE_CHARS = 20
+
+# Bodies are extracted in worker threads. The work is CPU-bound (markdown ->
+# trafilatura -> plain-text rebuild), so running it inline blocks the event loop
+# and serialises the reading stage; too many threads at once only adds contention.
+EXTRACT_CONCURRENCY = 8
 
 # Cap roles per source so one aggregator page cannot fill the hiring block.
 MAX_POSTINGS_PER_SOURCE = 10
@@ -226,6 +231,7 @@ async def _refill_missing_bodies(
     end_date: str,
     company_name: str,
     aliases: Optional[List[str]] = None,
+    deadline: Optional[float] = None,
 ) -> List[dict]:
     """Recover the results that arrived without a body.
 
@@ -238,6 +244,12 @@ async def _refill_missing_bodies(
 
     This is a one-shot repair: it runs only once per request and only when
     bodies are genuinely missing, because every run costs Tavily calls.
+
+    ``deadline`` is the retrieval budget's monotonic end. The re-run round is
+    the expensive half of this repair and it used to run whatever the clock said,
+    so a run already 45 seconds into its budget started another full round —
+    measured on Wipro, the whole search stage took 52.7 seconds against a
+    declared budget of 45. Recovery by targeted extract is cheap and always runs.
     """
     empty = [
         str(result.get("url") or "")
@@ -286,6 +298,14 @@ async def _refill_missing_bodies(
     retry_domains = [domain for domain in plan.domains if domain not in empty_hosts]
     if not retry_domains:
         logger.info("Body refill skipped | every planned publisher was empty")
+        return merged
+
+    if deadline is not None and time.monotonic() >= deadline:
+        logger.info(
+            "Body refill skipped | retrieval budget spent | with_body=%s | empty=%s",
+            with_body,
+            sorted(empty_hosts),
+        )
         return merged
 
     logger.info(
@@ -537,7 +557,8 @@ async def _search_plan(
             )
 
     merged = await _refill_missing_bodies(
-        merged, plan, start_date, end_date, company_name, aliases
+        merged, plan, start_date, end_date, company_name, aliases,
+        deadline=started_at + SEARCH_BUDGET_SECONDS,
     )
 
     round_index = 1
@@ -651,10 +672,31 @@ async def _route_and_collect(
     prepared: List[dict] = []
     postings_entries: List[dict] = []
 
-    # Careers pages need the page's structured markup, which the searched body
+    # Body extraction is CPU-bound: every article goes through markdown, then
+    # trafilatura, then the plain-text rebuild. Run inline on a 100-article run
+    # it blocked the event loop and held the whole routing stage: measured on
+    # Wipro, extraction plus routing took 54 seconds, and the classifier call
+    # inside it is a single request. Extracting in worker threads costs nothing
+    # in correctness — the inputs are already in memory and the outputs are
+    # per-article — and lets the classifier start as soon as all bodies exist.
+
+    extract_concurrency = asyncio.Semaphore(EXTRACT_CONCURRENCY)
+
+    async def _extract(result: dict, url: str) -> Optional[str]:
+        async with extract_concurrency:
+            return await asyncio.to_thread(
+                extract_clean_text,
+                result.get("raw_content"),
+                url,
+                company,
+                objective,
+            )
+
+    # A careers page needs the page's structured markup, which the searched body
     # does not contain: it is a JavaScript shell. They are fetched directly and
     # in parallel, so a board listing cannot stall the run.
     careers_entries: List[dict] = []
+    extractable: List[dict] = []
     for result in results:
         if not isinstance(result, dict):
             continue
@@ -662,15 +704,16 @@ async def _route_and_collect(
         if not url:
             continue
         if is_careers_url(url):
-            careers_entries.append(
-                {
-                    "result": result,
-                    "url": url,
-                    "clean_text": extract_clean_text(
-                        result.get("raw_content"), url, company, objective
-                    ) or "",
-                }
-            )
+            careers_entries.append({"result": result, "url": url})
+        else:
+            extractable.append({"result": result, "url": url})
+
+    bodies = await asyncio.gather(
+        *[_extract(entry["result"], entry["url"]) for entry in extractable],
+        *[_extract(entry["result"], entry["url"]) for entry in careers_entries],
+    )
+    article_bodies = bodies[: len(extractable)]
+    careers_bodies = bodies[len(extractable) :]
 
     if careers_entries:
         fetched = await asyncio.gather(
@@ -679,7 +722,10 @@ async def _route_and_collect(
                 for entry in careers_entries
             ]
         )
-        for entry, postings_found in zip(careers_entries, fetched):
+        for entry, postings_found, clean_text in zip(
+            careers_entries, fetched, careers_bodies
+        ):
+            entry["clean_text"] = clean_text or ""
             entry["postings"] = postings_found
             if postings_found:
                 postings_entries.append(entry)
@@ -687,18 +733,11 @@ async def _route_and_collect(
                 # No structured data, but the page does carry readable text.
                 postings_entries.append(entry)
 
-    for result in results:
-        if not isinstance(result, dict):
-            continue
-        url = str(result.get("url") or "")
-        if is_careers_url(url):
-            continue
-        clean_text = extract_clean_text(
-            result.get("raw_content"), url, company, objective
-        )
+    for entry, clean_text in zip(extractable, article_bodies):
         if not clean_text:
             continue
-        prepared.append({"result": result, "url": url, "clean_text": clean_text})
+        entry["clean_text"] = clean_text
+        prepared.append(entry)
 
     routes = await classify_article_subjects(
         [opening_sentence(item["clean_text"]) for item in prepared],
@@ -1350,18 +1389,9 @@ async def ingest_company_data(
         )
     )
 
-    # A careers page is the one hiring source that does not need a search engine.
-    # Only what Tavily returned was ever read, so a company whose board does not
-    # rank for its own name had no hiring lane at all — measured: Canada Goose
-    # reported `hiring=0` across every run while its own site linked to a board
-    # carrying 96 roles. Probing the known shapes of a company careers URL costs
-    # one request per candidate shape and stops as soon as one answers.
-    if window.needs_fetch and not hiring_items:
-        probed = await _probe_own_careers(company_label, fetched, aliases)
-        if probed:
-            hiring_items.extend(probed)
-            logger.info("Hiring from the company's own board | roles=%s", len(probed))
-
+    # The own-careers probe, the quote and the incidental harvest each depend only
+    # on what retrieval already produced, so they run together further below
+    # instead of one after another.
     # Stored evidence was retrieved on an earlier run; it belongs to the same
     # company and the same window, so it is merged rather than re-fetched.
     #
@@ -1388,18 +1418,21 @@ async def ingest_company_data(
             len(hard_facts),
         )
 
-    # A price is a fact with a clock, and no article is obliged to state today's
-    # number. A caller who supplied a ticker gets that listing; one who did not
-    # gets the symbol resolved from the company name, because otherwise a brief on
-    # a listed company simply had no price — measured, five stored briefs for
-    # Canada Goose (GOOS on NYSE, GOOS.TO on Toronto) carried none.
+    # Three stages below are independent of each other and only depend on what
+    # retrieval already produced:
     #
-    # The resolver refuses to guess: a name search for a private group returns
-    # symbols belonging to unrelated companies (measured, "YKK" matched two Finnish
-    # firms), and a wrong price is worse than no price. A company with no confident
-    # match therefore has no quote, rather than an invented one.
-    quote_item = None
-    if window.needs_fetch:
+    #   * the quote needs the company name and its country,
+    #   * the own-careers probe needs the fetched result set,
+    #   * the incidental harvest needs the articles routed to someone else.
+    #
+    # Run in parallel, because waiting for each in turn is pure latency: measured
+    # on a Wipro run they cost 15.8s + 15.2s + 18.0s one after another, and none
+    # of them reads the others' output.
+
+    async def _resolve_quote() -> Optional[FactItem]:
+        """Resolve the symbol and fetch its price, or return None."""
+        if not window.needs_fetch:
+            return None
         ticker = request.ticker.strip()
         if not ticker:
             match = await asyncio.to_thread(
@@ -1412,24 +1445,45 @@ async def ingest_company_data(
                     company_label,
                     ticker,
                 )
-        if ticker:
-            quote = await asyncio.to_thread(fetch_quote, ticker)
-            if quote is not None:
-                quote_item = FactItem(
-                    content=quote.to_line(),
-                    source_url=quote.source_url,
-                    publish_date=quote.as_of,
-                )
+        if not ticker:
+            return None
+        quote = await asyncio.to_thread(fetch_quote, ticker)
+        if quote is None:
+            return None
+        return FactItem(
+            content=quote.to_line(),
+            source_url=quote.source_url,
+            publish_date=quote.as_of,
+        )
 
-    # Facts about us that appear inside other companies' articles. They are kept
-    # apart from the evidence the model reasons over: they exist so a reader can
-    # follow up, not so the brief can lean on them.
-    incidental, incidental_stats = await harvest_incidental_facts(
-        other_articles,
-        company_label,
-        window.window_start.isoformat(),
-        already_collected=[item.content for item in hard_facts],
+    async def _probe_careers() -> List[FactItem]:
+        """Read the company's own board when the hiring lane is still empty."""
+        if not (window.needs_fetch and not hiring_items):
+            return []
+        probed = await _probe_own_careers(company_label, fetched, aliases)
+        if probed:
+            logger.info("Hiring from the company's own board | roles=%s", len(probed))
+        return probed
+
+    async def _harvest() -> Tuple[List[IncidentalFact], dict]:
+        """Facts about us found inside other companies' articles."""
+        return await harvest_incidental_facts(
+            other_articles,
+            company_label,
+            window.window_start.isoformat(),
+            already_collected=[item.content for item in hard_facts],
+        )
+
+    quote_item, probed_items, harvested = await asyncio.gather(
+        _resolve_quote(),
+        _probe_careers(),
+        _harvest(),
     )
+
+    if probed_items:
+        hiring_items.extend(probed_items)
+
+    incidental, incidental_stats = harvested
     if incidental and window.needs_fetch:
         incidental = await corroborate_incidental_facts(
             incidental,

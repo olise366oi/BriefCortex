@@ -14,7 +14,11 @@ logger = get_logger("corroboration")
 # search, and only the first few hits are read.
 MAX_FOLLOWUPS = 8
 MAX_RESULTS_PER_FOLLOWUP = 5
-FOLLOWUP_CONCURRENCY = 3
+
+# Follow-up searches are independent Tavily calls, so the only reason to
+# serialise them is to protect the API. Three at a time turned eight
+# corroboration checks into 21.6 seconds on a measured Wipro run.
+FOLLOWUP_CONCURRENCY = 8
 
 
 def _query_for(fact: IncidentalFact) -> str:

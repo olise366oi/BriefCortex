@@ -15,7 +15,7 @@ from app.services.source_rules import (
     SITE_BODY_RULES,
     SITE_SECTION_RULES,
 )
-from app.services.hiring import is_careers_url
+from app.services.hiring import is_careers_url, is_job_board
 from app.services.long_document import is_long_document, select_relevant
 from app.services.logger_service import get_logger
 from app.services.media_trust import is_refused_host, is_roundup_url
@@ -227,6 +227,7 @@ def filter_results_for_company(
     refused: List[str] = []
     roundups = 0
     recruitment = 0
+    boards = 0
     for result in results:
         if not isinstance(result, dict):
             continue
@@ -242,9 +243,25 @@ def filter_results_for_company(
         # board, which is the one thing that lane exists to read. Measured: the
         # LinkedIn lane returned zero usable results on every run because every
         # result was refused before its role was ever looked at.
+        #
+        # A third-party job board is refused even though its path says "jobs": an
+        # aggregator rewrites every posting into its own template, so nothing on
+        # it is a statement the employer made. Measured on Wipro: Naukri and a
+        # "how to apply" page put thirteen template lines into the news lane.
         if is_careers_url(url):
+            if is_job_board(url):
+                boards += 1
+                continue
             if mentions_company(result, company_name, aliases):
                 kept.append(result)
+            continue
+
+        # A job board is refused as reporting too, even when its path does not
+        # look like a careers page: `naukri.com/wipro-jobs-careers-1384` has no
+        # `/jobs/` segment, so it fell through to the reporting path and put four
+        # rewritten template lines into the news lane of a measured Wipro run.
+        if is_job_board(url):
+            boards += 1
             continue
 
         if is_refused_host(url):
@@ -282,6 +299,8 @@ def filter_results_for_company(
         )
     if recruitment:
         logger.info("Recruitment pages skipped | count=%s", recruitment)
+    if boards:
+        logger.info("Third-party job boards skipped | count=%s", boards)
 
     return kept
 

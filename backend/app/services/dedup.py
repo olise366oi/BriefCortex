@@ -8,6 +8,7 @@ pairs and the model decides them.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass
@@ -30,6 +31,19 @@ CANDIDATE_SIMILARITY = 0.6
 # the list is capped and the strongest candidates win.
 MAX_CANDIDATES = 20
 BATCH_SIZE = 12
+
+# Confirmation batches run concurrently. Each batch is an independent model call,
+# so waiting for one before starting the next is pure latency: measured on a
+# Wipro run, 172 facts took 335 seconds in the merge stage alone — 64% of the
+# whole ingestion — because the anchor loop issued one confirmation round after
+# another.
+CONFIRM_CONCURRENCY = 8
+
+# Partners kept per fact in the global candidate pass. Without a per-fact bound
+# a page of near-identical syndicated sentences would post thousands of pairs;
+# this keeps the model's workload proportional to the fact count rather than to
+# its square.
+MAX_PARTNERS_PER_FACT = 8
 
 SAME_EVENT_PROMPT = """You decide whether two sentences report the same fact.
 
@@ -150,6 +164,54 @@ def find_candidates(
     return pairs[:max_candidates]
 
 
+def find_candidates_global(
+    facts: Sequence[str],
+    *,
+    threshold: float = CANDIDATE_SIMILARITY,
+    max_partners: int = MAX_PARTNERS_PER_FACT,
+) -> List[CandidatePair]:
+    """Return candidate pairs across the whole set, strongest first.
+
+    The previous merge walked one anchor at a time and asked the model about its
+    partners, then re-asked about the remaining ones after every accept — one
+    model round per accepted fact, which is where 335 seconds went on a 172-fact
+    run. The pairs do not depend on the merge order, so they are all proposed
+    once and confirmed in parallel; the grouping is then a union-find over the
+    confirmed pairs.
+
+    ``max_partners`` bounds each fact's contribution: a page of near-identical
+    syndicated sentences otherwise proposes thousands of pairs, none of which
+    the model needs to see twice.
+    """
+    scored: List[CandidatePair] = []
+    for left in range(len(facts)):
+        for right in range(left + 1, len(facts)):
+            score = similarity(facts[left], facts[right])
+            if score >= threshold:
+                scored.append(
+                    CandidatePair(
+                        existing_index=left,
+                        incoming_index=right,
+                        similarity=score,
+                    )
+                )
+
+    scored.sort(key=lambda pair: pair.similarity, reverse=True)
+
+    kept: List[CandidatePair] = []
+    partners: dict[int, int] = {}
+    for pair in scored:
+        if (
+            partners.get(pair.existing_index, 0) >= max_partners
+            or partners.get(pair.incoming_index, 0) >= max_partners
+        ):
+            continue
+        kept.append(pair)
+        partners[pair.existing_index] = partners.get(pair.existing_index, 0) + 1
+        partners[pair.incoming_index] = partners.get(pair.incoming_index, 0) + 1
+    return kept
+
+
 async def confirm_same_facts(
     existing: Sequence[str],
     incoming: Sequence[str],
@@ -160,46 +222,58 @@ async def confirm_same_facts(
     When the model is unavailable nothing is confirmed and every incoming
     sentence survives. Keeping a duplicate is recoverable; deleting a distinct
     fact is not.
+
+    Batches are independent calls, so they run concurrently: a run with 172
+    facts had enough candidate pairs that confirming them one batch at a time
+    was most of the request's wall clock.
     """
     if not pairs:
         return []
 
-    confirmed: List[CandidatePair] = []
+    batches = [
+        pairs[start : start + BATCH_SIZE]
+        for start in range(0, len(pairs), BATCH_SIZE)
+    ]
 
-    for start in range(0, len(pairs), BATCH_SIZE):
-        batch = pairs[start : start + BATCH_SIZE]
-        lines = []
-        for offset, pair in enumerate(batch):
-            lines.append(
-                f"[{offset}]\nA: {existing[pair.existing_index]}\n"
-                f"B: {incoming[pair.incoming_index]}"
-            )
-        prompt = "\n\n".join(lines)
+    semaphore = asyncio.Semaphore(CONFIRM_CONCURRENCY)
 
-        try:
-            client, model = build_client()
-            response = await client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": SAME_EVENT_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.0,
-            )
-            content = response.choices[0].message.content or ""
-            verdicts = PairVerdicts.model_validate(json.loads(content))
-        except Exception as exc:
-            logger.warning("Semantic dedup unavailable, keeping all | %s", exc)
-            continue
+    async def confirm_batch(batch: Sequence[CandidatePair]) -> List[CandidatePair]:
+        async with semaphore:
+            lines = []
+            for offset, pair in enumerate(batch):
+                lines.append(
+                    f"[{offset}]\nA: {existing[pair.existing_index]}\n"
+                    f"B: {incoming[pair.incoming_index]}"
+                )
+            prompt = "\n\n".join(lines)
 
+            try:
+                client, model = build_client()
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": SAME_EVENT_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.0,
+                )
+                content = response.choices[0].message.content or ""
+                verdicts = PairVerdicts.model_validate(json.loads(content))
+            except Exception as exc:
+                logger.warning("Semantic dedup unavailable, keeping all | %s", exc)
+                return []
+
+        confirmed: List[CandidatePair] = []
         for verdict in verdicts.pairs:
             if not verdict.same:
                 continue
             if 0 <= verdict.index < len(batch):
                 confirmed.append(batch[verdict.index])
+        return confirmed
 
-    return confirmed
+    results = await asyncio.gather(*[confirm_batch(batch) for batch in batches])
+    return [pair for batch_confirmed in results for pair in batch_confirmed]
 
 
 async def merge_duplicate_facts(
@@ -219,57 +293,40 @@ async def merge_duplicate_facts(
     if len(facts) < 2:
         return list(facts), stats
 
-    merged: List[FactItem] = []
-    claimed: set[int] = set()
+    texts = [item.content for item in facts]
+    pairs = find_candidates_global(texts)
+    confirmed = await confirm_same_facts(texts, texts, pairs) if pairs else []
+    if not pairs:
+        logger.info(
+            "Fact merge | considered=%s | no lexical candidates, model not asked",
+            len(facts),
+        )
+        return list(facts), stats
 
+    parent = list(range(len(facts)))
+
+    def find_root(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find_root(left), find_root(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for pair in confirmed:
+        union(pair.existing_index, pair.incoming_index)
+
+    groups: dict[int, List[FactItem]] = {}
     for index, fact in enumerate(facts):
-        if index in claimed:
-            continue
+        groups.setdefault(find_root(index), []).append(fact)
 
-        group = [fact]
-        candidates = [
-            (other_index, other)
-            for other_index, other in enumerate(facts)
-            if other_index != index and other_index not in claimed
-        ]
-        if not candidates:
-            merged.append(fact)
-            stats["kept"] += 1
-            continue
-
-        # Compare against every member already in the group, not just the
-        # anchor: a third telling can be worded closer to the second one, and
-        # pairing only against the anchor would silently leave it unmerged.
-        remaining = list(candidates)
-        while remaining:
-            existing_texts = [item.content for item in group]
-            incoming_texts = [other.content for _i, other in remaining]
-
-            pairs = find_candidates(existing_texts, incoming_texts)
-            if not pairs:
-                break
-
-            confirmed = await confirm_same_facts(existing_texts, incoming_texts, pairs)
-            if not confirmed:
-                break
-
-            advanced = False
-            for pair in confirmed:
-                other_index, other = remaining[pair.incoming_index]
-                if other_index in claimed or other in group:
-                    continue
-                claimed.add(other_index)
-                group.append(other)
-                advanced = True
-
-            if not advanced:
-                break
-            remaining = [
-                entry for entry in remaining if entry[0] not in claimed
-            ]
-
+    merged: List[FactItem] = []
+    for group in groups.values():
         if len(group) == 1:
-            merged.append(fact)
+            merged.append(group[0])
             stats["kept"] += 1
             continue
 
@@ -286,8 +343,10 @@ async def merge_duplicate_facts(
         stats["merged"] += len(group) - 1
 
     logger.info(
-        "Fact merge | considered=%s | merged=%s | kept=%s",
+        "Fact merge | considered=%s | candidates=%s | confirmed=%s | merged=%s | kept=%s",
         stats["considered"],
+        len(pairs),
+        len(confirmed),
         stats["merged"],
         stats["kept"],
     )
