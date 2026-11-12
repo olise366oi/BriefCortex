@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import re
 import time
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import List, Optional, Tuple
 
@@ -58,6 +59,7 @@ from app.services.urls import host_of
 from app.services.incidental_harvest import harvest_incidental_facts
 from app.services.legal_signals import legal_queries
 from app.services.media_trust import (
+    MediaPolicy,
     generate_local_queries,
     infer_jurisdiction,
     is_refused_host,
@@ -71,7 +73,7 @@ from app.services.publisher_filter import (
 )
 from app.services.search_planner import SearchPlan, plan_searches, replan_after_empty
 from app.services.tavily_search import extract_bodies, tavily_search
-from app.services.window import compute_evidence_window
+from app.services.window import EvidenceWindow, compute_evidence_window
 
 logger = get_logger("ingestion")
 
@@ -1178,6 +1180,205 @@ def _collect_posting(
     return items, stats
 
 
+@dataclass(frozen=True)
+class _CompanyContext:
+    """What identifying the company settles before any search runs."""
+
+    label: str
+    identity: Optional[CompanyIdentity]
+    aliases: Optional[List[str]]
+    press_jurisdiction: Optional[str]
+    trust_policy: MediaPolicy
+
+
+async def _resolve_company_context(
+    request: BriefingRequest,
+    preferred_jurisdiction: Optional[str],
+) -> _CompanyContext:
+    """Identify the company and resolve its press policy once.
+
+    The registry result decides which regulator the legal queries name; an
+    unidentified company gets generic queries instead of a guessed jurisdiction.
+    A ticker collides with unrelated registered companies, so when the name is too
+    short for an exact match to mean anything the model is asked which entity is
+    meant. Until that is settled the jurisdiction is left unused: aiming legal
+    searches at the wrong country is worse than not aiming them.
+
+    A caller who rejected every registry candidate ("other") supplies a
+    description instead, and that description becomes the only source of
+    jurisdiction. The registry is then never used as a fallback, because its
+    closest match is an unrelated business that shares the name.
+    """
+    label = request.company_name.strip()
+    description = request.company_description
+
+    description_hint = jurisdiction_from_description(description)
+    confirmed_other = bool(description.strip()) and preferred_jurisdiction is None
+
+    identity = await asyncio.to_thread(
+        resolve_identity,
+        label,
+        preferred_jurisdiction=preferred_jurisdiction or description_hint,
+        allow_fallback=not confirmed_other,
+    )
+    if not confirmed_other and preferred_jurisdiction is None and identity is not None:
+        candidates = await asyncio.to_thread(rank_candidates, label)
+        if needs_caller_choice(label, candidates):
+            decided = await disambiguate_with_model(label, candidates)
+            if decided and decided != "none":
+                identity = await asyncio.to_thread(
+                    resolve_identity,
+                    label,
+                    preferred_jurisdiction=decided,
+                )
+            elif decided == "none":
+                logger.info(
+                    "Identity withheld | company=%r | registry matches are unrelated",
+                    label,
+                )
+                identity = None
+
+    if confirmed_other:
+        logger.info(
+            "Caller described the company | company=%r | description=%r | "
+            "jurisdiction=%s | registry_identity=%s",
+            label,
+            description.strip()[:120],
+            description_hint,
+            identity.name if identity is not None else None,
+        )
+
+    if description.strip():
+        logger.info("Description available for entity separation | company=%r", label)
+
+    # The registry name is the company's other name, and the routing stage reads
+    # headlines with it, whether or not retrieval ran this time.
+    aliases = [identity.name] if identity is not None else None
+
+    # A company's registered country decides its press list. When the registry
+    # could not name a legal entity the country is taken from the company's own
+    # domain, and failing that the model is asked: reading a Japanese firm through
+    # an English-language wire list is what turned its coverage into a decade of
+    # American litigation filings.
+    press_jurisdiction = jurisdiction_from_registry(identity, label)
+    if not press_jurisdiction:
+        press_jurisdiction = jurisdiction_from_url(_likely_company_domain(label))
+        if press_jurisdiction:
+            logger.info(
+                "Jurisdiction from company domain | company=%r | country=%s",
+                label,
+                press_jurisdiction,
+            )
+    if not press_jurisdiction:
+        press_jurisdiction = await infer_jurisdiction(label)
+
+    # One press list per company, resolved once and reused by the planner and by
+    # the reading order. Generation costs a model call per country, so a stored
+    # list is preferred and a company with no known country gets no national tier
+    # rather than a guessed one.
+    trust_policy = await resolve_policy(press_jurisdiction)
+    logger.info("Media trust | %s", trust_policy.description)
+    return _CompanyContext(
+        label=label,
+        identity=identity,
+        aliases=aliases,
+        press_jurisdiction=press_jurisdiction,
+        trust_policy=trust_policy,
+    )
+
+
+async def _retrieve_evidence(
+    request: BriefingRequest,
+    window: EvidenceWindow,
+    context: _CompanyContext,
+    *,
+    known_urls: Optional[set],
+    failures: List[str],
+) -> List[dict]:
+    """Plan, search, date-resolve and order the evidence for one run.
+
+    ``failures`` is filled with the queries the search API refused, so the
+    coverage ledger can report a cut-off run as cut off rather than as empty.
+    """
+    if not window.needs_fetch:
+        # Everything up to today is already covered, so reuse what is stored
+        # instead of paying for an identical search.
+        logger.info(
+            "Retrieval skipped | coverage already reaches %s", window.available_end
+        )
+        return []
+
+    # The company's registered country decides which national press is searched:
+    # a company is covered where it lives, and the international wire list alone
+    # returns foreign filings about a mid-sized firm instead of its own business
+    # press.
+    plan = await plan_searches(
+        context.label,
+        request.meeting_purpose.strip(),
+        context.trust_policy,
+    )
+    logger.info(
+        "Search plan | industry=%s | categories=%s | fundamentals=%s",
+        plan.industry, plan.categories, plan.fundamentals,
+    )
+
+    # Legal exposure is searched by jurisdiction, not by the model's plan: the
+    # planner knows the industry, not where the company is registered. Hiring runs
+    # here too: a careers page is usually on the company's own site, which the
+    # publisher registry does not contain by design.
+    open_queries = legal_queries(context.label, context.identity) + hiring_queries(
+        context.label
+    )
+
+    # The other company the objective names gets its own queries. A relationship
+    # query ("Canada Goose YKK zipper pricing") returns the briefed company's
+    # coverage and mentions the supplier in passing, so the supplier side of a
+    # negotiation was never actually looked up: one measured brief concluded
+    # "silent on YKK" because nothing had searched for YKK.
+    partners = counterparties(request.meeting_purpose, context.label)
+    if partners:
+        open_queries.extend(
+            query
+            for partner in partners
+            for query in counterparty_queries(partner)
+        )
+        logger.info("Counterparty lane | named=%s", partners)
+
+    linkedin_queries = linkedin_hiring_queries(context.label)
+
+    # Queries in the country's own language, scoped to that country's own press.
+    # Generated only when the press list names a language: an untranslated query
+    # is better than a bad translation.
+    local_queries = await generate_local_queries(context.label, context.trust_policy)
+    local_domains = list(context.trust_policy.national) if local_queries else []
+
+    # The registry name is the company's other name, and headlines use it: a
+    # search for "IBM" otherwise discards "International Business Machines".
+    fetched = await _search_plan(
+        plan,
+        window.fetch_start.isoformat(),
+        window.fetch_end.isoformat(),
+        context.label,
+        known_urls=known_urls,
+        open_queries=open_queries,
+        aliases=context.aliases,
+        linkedin_queries=linkedin_queries,
+        local_queries=local_queries,
+        local_domains=local_domains,
+        meeting_purpose=request.meeting_purpose.strip(),
+        national_press=list(context.trust_policy.national),
+        failures=failures,
+    )
+
+    fetched = await resolve_publish_dates(fetched)
+    fetched = _drop_out_of_window(fetched, window.window_start, window.available_end)
+    fetched = order_by_publisher(fetched)
+    # Trust ordering, applied last so it is what the reading budget actually
+    # follows: national press of the company's own country is read before foreign
+    # wires, because that is where a mid-sized non-US firm is covered.
+    return order_by_trust(fetched, context.trust_policy)
+
+
 async def ingest_company_data(
     request: BriefingRequest,
     *,
@@ -1215,172 +1416,18 @@ async def ingest_company_data(
         window.is_complete, window.needs_fetch, window.preliminary,
     )
 
-    company_label = request.company_name.strip()
-
-    # Identify the company before searching for it. The registry result decides
-    # which regulator the legal queries name; an unidentified company gets
-    # generic queries instead of a guessed jurisdiction.
-    #
-    # A ticker collides with unrelated registered companies, so when the name is
-    # too short for an exact match to mean anything the model is asked which
-    # entity is meant. Until that is settled the jurisdiction is left unused:
-    # aiming legal searches at the wrong country is worse than not aiming them.
-    #
-    # A caller who rejected every registry candidate ("other") supplies a
-    # description instead, and that description becomes the only source of
-    # jurisdiction. The registry is then never used as a fallback, because its
-    # closest match is an unrelated business that shares the name.
-    description_hint = jurisdiction_from_description(request.company_description)
-    confirmed_other = bool(request.company_description.strip()) and (
-        preferred_jurisdiction is None
-    )
-
-    identity = await asyncio.to_thread(
-        resolve_identity,
-        company_label,
-        preferred_jurisdiction=preferred_jurisdiction or description_hint,
-        allow_fallback=not confirmed_other,
-    )
-    if not confirmed_other and preferred_jurisdiction is None and identity is not None:
-        candidates = await asyncio.to_thread(rank_candidates, company_label)
-        if needs_caller_choice(company_label, candidates):
-            decided = await disambiguate_with_model(company_label, candidates)
-            if decided and decided != "none":
-                identity = await asyncio.to_thread(
-                    resolve_identity,
-                    company_label,
-                    preferred_jurisdiction=decided,
-                )
-            elif decided == "none":
-                logger.info(
-                    "Identity withheld | company=%r | registry matches are unrelated",
-                    company_label,
-                )
-                identity = None
-
-    if confirmed_other:
-        logger.info(
-            "Caller described the company | company=%r | description=%r | "
-            "jurisdiction=%s | registry_identity=%s",
-            company_label,
-            request.company_description.strip()[:120],
-            description_hint,
-            identity.name if identity is not None else None,
-        )
-
-    if request.company_description.strip():
-        logger.info(
-            "Description available for entity separation | company=%r", company_label
-        )
-
-    # Kept in scope outside the fetch branch: the routing stage uses the registry
-    # name to read headlines, whether or not retrieval ran this time.
-    aliases = [identity.name] if identity is not None else None
-
-    # A company's registered country decides its press list, so when the registry
-    # could not name a legal entity the country is taken from the company's own
-    # domain instead. A private firm has no LEI but it does publish where it is
-    # based, and reading a Japanese company through an English-language wire list
-    # is what turned its coverage into a decade of American litigation filings.
-    press_jurisdiction = jurisdiction_from_registry(identity, company_label)
-
-    if not press_jurisdiction:
-        press_jurisdiction = jurisdiction_from_url(_likely_company_domain(company_label))
-        if press_jurisdiction:
-            logger.info(
-                "Jurisdiction from company domain | company=%r | country=%s",
-                company_label,
-                press_jurisdiction,
-            )
-    if not press_jurisdiction:
-        # The registry has no entity and the domain carries no country. Ask which
-        # country the company sits in, because reading a Japanese firm through an
-        # English-language wire list is what turned its coverage into a decade of
-        # American litigation filings.
-        press_jurisdiction = await infer_jurisdiction(company_label)
-
-    # One press list per company, resolved once and reused by the planner and by
-    # the reading order. Generation costs a model call per country, so a stored
-    # list is preferred and a company with no known country gets no national tier
-    # rather than a guessed one.
-    trust_policy = await resolve_policy(press_jurisdiction)
-    logger.info("Media trust | %s", trust_policy.description)
+    context = await _resolve_company_context(request, preferred_jurisdiction)
+    company_label = context.label
+    identity = context.identity
+    aliases = context.aliases
+    press_jurisdiction = context.press_jurisdiction
 
     # Queries the search API refused. Threaded into the coverage ledger below so
     # a cut-off run is reported as cut off, not as empty.
     search_failures: List[str] = []
-
-    if window.needs_fetch:
-        # The company's registered country decides which national press is
-        # searched: a company is covered where it lives, and the international
-        # wire list alone returns foreign filings about a mid-sized firm instead
-        # of its own business press.
-        plan = await plan_searches(
-            company_label,
-            request.meeting_purpose.strip(),
-            trust_policy,
-        )
-        logger.info(
-            "Search plan | industry=%s | categories=%s | fundamentals=%s",
-            plan.industry, plan.categories, plan.fundamentals,
-        )
-        # Legal exposure is searched by jurisdiction, not by the model's plan:
-        # the planner knows the industry, not where the company is registered.
-        # Hiring runs here too: a careers page is usually on the company's own
-        # site, which the publisher registry does not contain by design.
-        open_queries = legal_queries(company_label, identity) + hiring_queries(company_label)
-
-        # The other company the objective names gets its own queries. A
-        # relationship query ("Canada Goose YKK zipper pricing") returns the
-        # briefed company's coverage and mentions the supplier in passing, so the
-        # supplier side of a negotiation was never actually looked up: one measured
-        # brief concluded "silent on YKK" because nothing had searched for YKK.
-        partners = counterparties(request.meeting_purpose, company_label)
-        if partners:
-            open_queries.extend(
-                query
-                for partner in partners
-                for query in counterparty_queries(partner)
-            )
-            logger.info("Counterparty lane | named=%s", partners)
-
-        linkedin_queries = linkedin_hiring_queries(company_label)
-
-        # Queries in the country's own language, scoped to that country's own
-        # press. Generated only when the press list names a language other than
-        # English: an untranslated query is better than a bad translation.
-        local_queries = await generate_local_queries(company_label, trust_policy)
-        local_domains = list(trust_policy.national) if local_queries else []
-        # The registry name is the company's other name, and headlines use it:
-        # a search for "IBM" otherwise discards "International Business Machines".
-        fetched = await _search_plan(
-            plan,
-            window.fetch_start.isoformat(),
-            window.fetch_end.isoformat(),
-            company_label,
-            known_urls=known_urls,
-            open_queries=open_queries,
-            aliases=aliases,
-            linkedin_queries=linkedin_queries,
-            local_queries=local_queries,
-            local_domains=local_domains,
-            meeting_purpose=request.meeting_purpose.strip(),
-            national_press=list(trust_policy.national),
-            failures=search_failures,
-        )
-    else:
-        # Everything up to today is already covered, so reuse what is stored
-        # instead of paying for an identical search.
-        logger.info("Retrieval skipped | coverage already reaches %s", window.available_end)
-        fetched = []
-
-    fetched = await resolve_publish_dates(fetched)
-    fetched = _drop_out_of_window(fetched, window.window_start, window.available_end)
-    fetched = order_by_publisher(fetched)
-    # Trust ordering, applied last so it is what the reading budget actually
-    # follows: national press of the company's own country is read before foreign
-    # wires, because that is where a mid-sized non-US firm is covered.
-    fetched = order_by_trust(fetched, trust_policy)
+    fetched = await _retrieve_evidence(
+        request, window, context, known_urls=known_urls, failures=search_failures
+    )
 
     hard_facts, analyst_opinions, hiring_items, other_articles, prepared, stats = (
         await _route_and_collect(
@@ -1429,55 +1476,10 @@ async def ingest_company_data(
     # on a Wipro run they cost 15.8s + 15.2s + 18.0s one after another, and none
     # of them reads the others' output.
 
-    async def _resolve_quote() -> Optional[FactItem]:
-        """Resolve the symbol and fetch its price, or return None."""
-        if not window.needs_fetch:
-            return None
-        ticker = request.ticker.strip()
-        if not ticker:
-            match = await asyncio.to_thread(
-                resolve_ticker, company_label, press_jurisdiction or ""
-            )
-            ticker = match.symbol if match else ""
-            if ticker:
-                logger.info(
-                    "Ticker resolved from the name | company=%r | symbol=%s",
-                    company_label,
-                    ticker,
-                )
-        if not ticker:
-            return None
-        quote = await asyncio.to_thread(fetch_quote, ticker)
-        if quote is None:
-            return None
-        return FactItem(
-            content=quote.to_line(),
-            source_url=quote.source_url,
-            publish_date=quote.as_of,
-        )
-
-    async def _probe_careers() -> List[FactItem]:
-        """Read the company's own board when the hiring lane is still empty."""
-        if not (window.needs_fetch and not hiring_items):
-            return []
-        probed = await _probe_own_careers(company_label, fetched, aliases)
-        if probed:
-            logger.info("Hiring from the company's own board | roles=%s", len(probed))
-        return probed
-
-    async def _harvest() -> Tuple[List[IncidentalFact], dict]:
-        """Facts about us found inside other companies' articles."""
-        return await harvest_incidental_facts(
-            other_articles,
-            company_label,
-            window.window_start.isoformat(),
-            already_collected=[item.content for item in hard_facts],
-        )
-
     quote_item, probed_items, harvested = await asyncio.gather(
-        _resolve_quote(),
-        _probe_careers(),
-        _harvest(),
+        _fetch_quote_fact(request, window, company_label, press_jurisdiction),
+        _probe_own_board(window, hiring_items, company_label, fetched, aliases),
+        _harvest_incidental_stage(window, other_articles, company_label, hard_facts),
     )
 
     if probed_items:
@@ -1602,6 +1604,70 @@ async def ingest_company_data(
         len(fact_base.conflicts),
     )
     return fact_base
+
+
+async def _fetch_quote_fact(
+    request: BriefingRequest,
+    window: EvidenceWindow,
+    company_label: str,
+    press_jurisdiction: Optional[str],
+) -> Optional[FactItem]:
+    """Resolve the symbol and fetch its price, or return None."""
+    if not window.needs_fetch:
+        return None
+    ticker = request.ticker.strip()
+    if not ticker:
+        match = await asyncio.to_thread(
+            resolve_ticker, company_label, press_jurisdiction or ""
+        )
+        ticker = match.symbol if match else ""
+        if ticker:
+            logger.info(
+                "Ticker resolved from the name | company=%r | symbol=%s",
+                company_label,
+                ticker,
+            )
+    if not ticker:
+        return None
+    quote = await asyncio.to_thread(fetch_quote, ticker)
+    if quote is None:
+        return None
+    return FactItem(
+        content=quote.to_line(),
+        source_url=quote.source_url,
+        publish_date=quote.as_of,
+    )
+
+
+async def _probe_own_board(
+    window: EvidenceWindow,
+    hiring_items: List[FactItem],
+    company_label: str,
+    fetched: List[dict],
+    aliases: Optional[List[str]],
+) -> List[FactItem]:
+    """Read the company's own board when the hiring lane is still empty."""
+    if not (window.needs_fetch and not hiring_items):
+        return []
+    probed = await _probe_own_careers(company_label, fetched, aliases)
+    if probed:
+        logger.info("Hiring from the company's own board | roles=%s", len(probed))
+    return probed
+
+
+async def _harvest_incidental_stage(
+    window: EvidenceWindow,
+    other_articles: List[dict],
+    company_label: str,
+    hard_facts: List[FactItem],
+) -> Tuple[List[IncidentalFact], dict]:
+    """Facts about us found inside other companies' articles."""
+    return await harvest_incidental_facts(
+        other_articles,
+        company_label,
+        window.window_start.isoformat(),
+        already_collected=[item.content for item in hard_facts],
+    )
 
 
 def _count_sources(facts: List[FactItem]) -> int:
