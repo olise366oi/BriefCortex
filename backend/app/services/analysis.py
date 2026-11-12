@@ -230,6 +230,7 @@ async def generate_briefing_report(
         fact_base,
         company=company or fact_base.company_id,
         description=description,
+        cache_headers=gateway_headers,
     )
     audited = order_news(audited)
     if outcome.removed:

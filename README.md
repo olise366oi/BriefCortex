@@ -485,6 +485,14 @@ brief. Comparing a set with itself once "overturned" ten unchanged facts.
 Measured on Blue Star after those fixes: a later meeting day with unchanged
 evidence served the stored brief in **7.3s with zero model calls**.
 
+All four generation calls — findings, audit, analysis and recommendation — carry
+the same gateway headers, so an identical re-run replays each of them. Measured on
+KPIT after the audit was included: a re-run whose stored brief had been removed
+made four stage calls, **all four replayed by the gateway in 1–2 ms**, and
+finished in 21s; the original run took 249s and 86k tokens. The token log reports
+the usage carried by the replayed response, so it still counts those tokens — the
+gateway log (`bifrost/logs.db`, `cache_debug`) is where they show as not billed.
+
 Misses themselves are reduced in three places: the request cache (same company,
 objective and meeting day), the evidence fingerprint (same facts, whatever the
 meeting date), and the gateway request cache. The repository **enables** L4:
@@ -673,7 +681,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 671 passed.
+Expected: 672 passed.
 
 The gateway policy package ships its own suite, runnable without this backend:
 

@@ -395,6 +395,11 @@ front of the reader. Removals are listed in `removed_claims` with the source URL
 so the brief does not look cleaner than the evidence allows and an over-strict
 audit can be re-checked afterwards.
 
+The model pass carries the gateway's cache headers. Its prompt is a function of
+the findings and the evidence digest, so when neither changed the verdict is
+replayed rather than re-judged — and replaying it keeps the audited findings
+identical, which is what lets the analysis and recommendation replay too.
+
 **Why the figure check is one-sided.** It flags a figure only when it appears
 nowhere in the evidence — never when it is absent from the *cited* source. A
 claim that consolidates several facts states figures from all of them, and
@@ -467,9 +472,12 @@ identical second request `true`, refreshed evidence or objective `false` again.
 (`dimension: 1`) mode against the Redis Stack vector store, so an identical
 stage call is replayed instead of calling the provider. With `config_store`
 enabled the file is a seed: an existing store row wins until it is changed
-through the UI/`/api/plugins` or the store is reset. Measured on KPIT: the
-findings call replayed in 1ms with 11,136 prompt tokens served from the cache,
-and the re-run cost 33k tokens against 85k for the original run.
+through the UI/`/api/plugins` or the store is reset. All four generation calls
+carry the headers — findings, audit, analysis, recommendation — so an unchanged
+re-run replays all four. Measured on KPIT: four hits at 1–2 ms each, no provider
+call, 21s wall clock against 249s and 86k tokens for the original run. (The token
+log reports each response's own usage, so replayed responses still count; the
+gateway's `logs.cache_debug` is where they show as not billed.)
 
 **What a brief costs.** Every call reports the provider's `usage`, which
 `services/token_usage.py` accumulates per briefing (a ContextVar, so concurrent
@@ -542,7 +550,7 @@ which needs libpq and fails at import on a machine that has only psycopg2.
 
 ## 11. Testing
 
-`backend/tests/`, 671 tests, plus `bifrost-cache-policy/tests/`, 74 collected (68
+`backend/tests/`, 672 tests, plus `bifrost-cache-policy/tests/`, 74 collected (68
 pass, 6 live cases skipped unless `BIFROST_URL` is set). What they are for:
 
 - **Live-run regressions, not invented cases.** Every hiring-filter test uses a

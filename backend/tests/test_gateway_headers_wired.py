@@ -109,3 +109,61 @@ def test_the_cache_headers_are_built_for_the_evidence_set():
         "x-bf-content-class",
     }
     assert headers["x-bf-content-class"] == "volatile"
+
+
+def test_the_audit_also_carries_the_cache_headers(monkeypatch):
+    """The audit is a model call too; without headers its verdict cannot replay.
+
+    A replayed audit is also what keeps the audited findings identical, so the
+    analysis and recommendation stages can replay as well.
+    """
+    from types import SimpleNamespace
+
+    from app.services import report_audit
+
+    seen: list[dict] = []
+
+    class _Completions:
+        async def create(self, **kwargs):
+            seen.append(dict(kwargs.get("extra_headers") or {}))
+
+            class _Msg:
+                content = '{"verdicts": []}'
+
+            class _Choice:
+                message = _Msg()
+
+            class _Resp:
+                choices = [_Choice()]
+
+            return _Resp()
+
+    class _Chat:
+        completions = _Completions()
+
+    class _Client:
+        chat = _Chat()
+
+    monkeypatch.setattr(
+        report_audit, "build_client", lambda: (_Client(), "fake-model")
+    )
+
+    headers = {
+        "x-bf-cache-key": "key-1",
+        "x-bf-cache-ttl": "24h",
+        "x-bf-content-class": "volatile",
+    }
+    claim = SimpleNamespace(claim="NIO cut guidance.", source_url="https://x/1")
+
+    asyncio.run(
+        report_audit._audit_claims(
+            [("news", 0, claim)],
+            "NIO",
+            "",
+            "evidence",
+            _fact_base(),
+            extra_headers=headers,
+        )
+    )
+
+    assert seen == [headers]

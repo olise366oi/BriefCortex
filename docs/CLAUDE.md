@@ -66,7 +66,7 @@ npm run dev
 
 # Tests (keep the local Postgres up: repository cases open a real session)
 cd backend
-python -m pytest -q            # 653 tests
+python -m pytest -q            # 672 tests
 ```
 
 ## Where to Add Features
@@ -105,6 +105,14 @@ python -m pytest -q            # 653 tests
 - `/api/debug` is mounted only while `DEBUG=true`; it exposes pipeline internals and
   bypasses the job queue.
 - There is no auth by design: the service is loopback/demo-scoped, not public-ready.
+- Bifrost: `bifrost/config.json` seeds `config_store`, so editing it after the first
+  start changes nothing until `bifrost/config.db` is reset or the row is edited via
+  `/api/plugins`. `semantic_cache` is enabled there (direct mode, requires the Redis
+  vector store). Compose `env_file` entries are applied in order with the **last**
+  winning, so `backend/.env` must come after `backend/.env.example`.
+- Gateway runs are opt-in per process: set `GATEWAY_BASE_URL` (e.g.
+  `http://localhost:8080/v1`) and `GATEWAY_MODEL` (`deepseek/deepseek-flash`); the
+  stage calls then carry `x-bf-cache-key` and replay on an unchanged evidence set.
 
 ## What NOT to Do
 

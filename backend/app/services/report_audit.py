@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -206,6 +206,8 @@ async def _audit_claims(
     description: str,
     evidence: str,
     fact_base: FactBase,
+    *,
+    extra_headers: Optional[Dict[str, str]] = None,
 ) -> Dict[int, Dict[str, str]]:
     """Ask the model which claims do not hold. Returns {flat_index: verdict}."""
     if not claims:
@@ -242,6 +244,7 @@ async def _audit_claims(
             ],
             response_format={"type": "json_object"},
             temperature=0.0,
+            extra_headers=extra_headers or {},
         )
         content = response.choices[0].message.content or ""
         batch = AuditBatch.model_validate(json.loads(content))
@@ -270,8 +273,17 @@ async def audit_report(
     fact_base: FactBase,
     company: str,
     description: str = "",
+    *,
+    cache_headers: Optional[Dict[str, str]] = None,
 ) -> tuple[BriefingReport, AuditOutcome]:
-    """Return the brief with unverified claims removed, plus what was removed."""
+    """Return the brief with unverified claims removed, plus what was removed.
+
+    ``cache_headers`` carries the gateway's cache key and TTL. The audit is a
+    model call over the findings and the evidence digest, so when neither changed
+    the gateway can replay its verdict instead of paying for a second judgement —
+    and, just as important, replaying it keeps the audited findings identical,
+    which is what lets the analysis and recommendation replay too.
+    """
     outcome = AuditOutcome()
 
     claims = _flatten(report)
@@ -321,7 +333,12 @@ async def audit_report(
         )
 
     model_failures = await _audit_claims(
-        claims, company, description, _evidence_text(fact_base), fact_base
+        claims,
+        company,
+        description,
+        _evidence_text(fact_base),
+        fact_base,
+        extra_headers=cache_headers,
     )
     model_failures.update({k: v for k, v in unfunded.items() if k not in model_failures})
     model_failures.update({k: v for k, v in invented.items() if k not in model_failures})
