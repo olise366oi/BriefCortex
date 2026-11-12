@@ -59,12 +59,38 @@ def _as_items(raw: Sequence[dict]) -> List[FactItem]:
     return items
 
 
+def _canonical(text: str) -> str:
+    """Collapse whitespace and case, so formatting is not a new fact."""
+    return " ".join((text or "").lower().split())
+
+
 def detect_cross_set_conflicts(
     old_facts: Sequence[FactItem],
     new_facts: Sequence[FactItem],
 ) -> List[Dict[str, str]]:
     """Return contradictions where a new fact points the other way from an old one."""
     return _detect_cross_set_conflicts(old_facts, new_facts)
+
+
+def _only_added_facts_contradict(
+    old_facts: Sequence[FactItem],
+    new_facts: Sequence[FactItem],
+) -> List[Dict[str, str]]:
+    """Conflicts introduced by facts that were not already stored.
+
+    Running the cross-set check over two identical sets reports the set's own
+    internal tension as a contradiction: measured on an unchanged Blue Star fact
+    base, it "overturned" ten stored facts and regenerated the brief for nothing.
+    Only a fact new since the stored brief can overturn it.
+    """
+    stored = {_canonical(item.content) for item in old_facts}
+    added = [item for item in new_facts if _canonical(item.content) not in stored]
+    if not added:
+        logger.info(
+            "Invalidation | no new facts since the stored brief | stored reading stands"
+        )
+        return []
+    return detect_cross_set_conflicts(old_facts, added)
 
 
 def check_reuse(
@@ -96,7 +122,7 @@ def check_reuse(
         logger.info("Invalidation | storedFacts=0 | cannot cross-check")
         return InvalidationVerdict(reusable=False, conflicts=[])
 
-    conflicts = detect_cross_set_conflicts(old_facts, fact_base.hard_facts)
+    conflicts = _only_added_facts_contradict(old_facts, fact_base.hard_facts)
 
     if conflicts:
         logger.info(

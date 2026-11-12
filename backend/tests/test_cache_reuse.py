@@ -142,3 +142,31 @@ def test_missing_stored_evidence_is_not_reused_on_trust():
     verdict = check_reuse(None, _base([_fact("The company is hiring.")]))
 
     assert verdict.reusable is False
+
+
+def test_unchanged_evidence_is_never_invalidated_by_its_own_internal_tension(
+    monkeypatch,
+):
+    """The cross-set check must only compare facts added since the stored brief.
+
+    Measured: an unchanged Blue Star fact base reported ten "overturns" and
+    regenerated the brief, because the check compared the set with itself.
+    """
+    from app.services import cache_invalidation
+
+    monkeypatch.setattr(
+        cache_invalidation,
+        "detect_cross_set_conflicts",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("a set must not be compared with itself")
+        ),
+    )
+
+    facts = [
+        _fact("Margins rose 200 bps.", "https://x/1"),
+        _fact("Margins fell 200 bps.", "https://x/2"),
+    ]
+
+    verdict = check_reuse(_evidence(facts), _base(facts))
+
+    assert verdict.reusable

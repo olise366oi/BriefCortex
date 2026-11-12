@@ -163,3 +163,23 @@ def test_the_same_sentence_can_exist_as_both_kinds(db):
 
     assert len(repo.list_by_kind("nio-abc", "hard")) == 1
     assert len(repo.list_by_kind("nio-abc", "opinion")) == 1
+
+
+def test_keep_only_drops_superseded_tellings(db):
+    repo = EvidenceRepository(db)
+    repo.add_many(
+        "nio-abc",
+        [
+            _fact("NIO reported revenue of 18.7 billion yuan.", 12),
+            _fact("Deliveries reached 61,855 units in the quarter.", 20),
+        ],
+    )
+
+    removed = repo.keep_only(
+        "nio-abc", ["NIO reported revenue of 18.7 billion yuan."]
+    )
+
+    assert removed == 1
+    assert [
+        row.content for row in repo.list_by_kind("nio-abc", "hard")
+    ] == ["NIO reported revenue of 18.7 billion yuan."]

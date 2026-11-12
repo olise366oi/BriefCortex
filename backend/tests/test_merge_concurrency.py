@@ -239,3 +239,30 @@ def test_global_candidates_agree_with_the_public_similarity():
             facts[pair.existing_index], facts[pair.incoming_index]
         )
         assert pair.similarity == pytest.approx(expected)
+
+
+def test_stored_facts_are_not_re_merged(monkeypatch):
+    """A stored fact set is already merged; re-asking the model changes it.
+
+    Measured: a later run with no new facts re-confirmed six stored pairs, so
+    the merged set (and its evidence fingerprint) changed and the brief
+    regenerated although nothing new had arrived.
+    """
+
+    async def boom(*_args, **_kwargs):
+        raise AssertionError("stored facts must not be re-confirmed")
+
+    monkeypatch.setattr(dedup, "confirm_same_facts", boom)
+
+    facts = [
+        _fact(SHORT, "https://a.com/1"),
+        _fact(FULLER, "https://b.com/2"),
+        _fact(THIRD, "https://c.com/3"),
+    ]
+
+    merged, stats = asyncio.run(
+        dedup.merge_duplicate_facts(facts, protected=len(facts))
+    )
+
+    assert merged == facts
+    assert stats["merged"] == 0

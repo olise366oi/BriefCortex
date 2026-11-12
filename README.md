@@ -469,6 +469,21 @@ Three properties keep the bill down, and each is a deliberate trade-off:
 - **Cache misses are named.** `Request cache miss … reason=no record|expired`
   and `Evidence-set cache miss …` make the hit rate explainable from the log
   instead of an unexplained bill.
+- **Mechanical stages do not reason.** deepseek-flash bills reasoning as
+  completion tokens: a five-token JSON verdict cost 99 completion tokens with
+  reasoning on and 5 with it off. Dedup confirmation and subject routing opt out
+  (`reasoning_effort: "none"`); the three generation stages keep it.
+- **The provider's prompt cache is visible.** The usage line carries
+  `cached_prompt_tokens`, so a run that reuses a repeated system prompt shows
+  what the provider served from its own cache.
+
+The evidence set itself is kept stable, because a moving fact set is what forces
+regeneration: stored facts are pruned to the merged set after each run (a
+superseded telling is one claim, not two), stored postings are reloaded as
+evidence, and the invalidation check only considers facts added since the stored
+brief. Comparing a set with itself once "overturned" ten unchanged facts.
+Measured on Blue Star after those fixes: a later meeting day with unchanged
+evidence served the stored brief in **7.3s with zero model calls**.
 
 Misses themselves are reduced in three places: the request cache (same company,
 objective and meeting day), the evidence fingerprint (same facts, whatever the
@@ -654,7 +669,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 667 passed.
+Expected: 671 passed.
 
 The gateway policy package ships its own suite, runnable without this backend:
 

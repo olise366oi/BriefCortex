@@ -471,7 +471,7 @@ enabling it is a deployment decision, documented in the package README.
 tasks report into the same totals) and the job logs once:
 
 ```text
-Briefing token usage | id=… | calls=… | prompt_tokens=… | completion_tokens=… | total_tokens=…
+Briefing token usage | id=… | calls=… | prompt_tokens=… | completion_tokens=… | cached_prompt_tokens=… | total_tokens=…
 ```
 
 The findings prompt is the largest single input because it carries the hard
@@ -483,6 +483,16 @@ the merged fact set — a changed set would change the evidence fingerprint and
 force regeneration. Misses are logged with their reason (`Request cache miss …
 reason=…`, `Evidence-set cache miss …`), which is what makes a hit rate
 explainable instead of an unexplained bill.
+
+**A stable evidence set is part of the cache.** `EvidenceRepository.add_many`
+skips known content hashes, `keep_only` deletes the rows a later fact set
+superseded, postings are stored under their own kind and reloaded, and only facts
+added since the stored brief are compared for contradictions. Without that, a
+later run reloaded superseded tellings and postings that had never been stored
+(postings 11 → 0), missed the fingerprint, and then invalidated itself by
+comparing the set with itself. Measured on Blue Star: after those fixes a later
+meeting day with unchanged evidence served the stored brief in 7.3s with zero
+model calls.
 
 ## 9. LLM access
 
@@ -509,6 +519,14 @@ wrapper reads `response.usage` and records it, and `_process_job` opens one
 collector per briefing. A call made outside a briefing (a test, a probe script)
 records nothing and costs no bookkeeping.
 
+Mechanical calls pass `no_reasoning()` (`reasoning_effort: "none"`). deepseek-flash
+reasons by default and bills that as completion: measured, a five-token JSON
+verdict cost 99 completion tokens with reasoning and 5 without. Dedup
+confirmation and subject routing opt out; the three generation stages keep it.
+The collector also records the provider's `prompt_cache_hit_tokens` as
+`cached_prompt_tokens`, so a repeated system prompt shows what the provider
+served from its own cache.
+
 ## 10. Configuration
 
 `core/config.py`. `.env` wins over `.env.example`, and real environment variables
@@ -519,7 +537,7 @@ which needs libpq and fails at import on a machine that has only psycopg2.
 
 ## 11. Testing
 
-`backend/tests/`, 667 tests, plus `bifrost-cache-policy/tests/`, 74 collected (68
+`backend/tests/`, 671 tests, plus `bifrost-cache-policy/tests/`, 74 collected (68
 pass, 6 live cases skipped unless `BIFROST_URL` is set). What they are for:
 
 - **Live-run regressions, not invented cases.** Every hiring-filter test uses a

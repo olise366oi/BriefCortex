@@ -1385,6 +1385,7 @@ async def ingest_company_data(
     coverage_end: Optional[date] = None,
     stored_facts: Optional[List[FactItem]] = None,
     stored_opinions: Optional[List[FactItem]] = None,
+    stored_hiring: Optional[List[FactItem]] = None,
     known_urls: Optional[set] = None,
     preferred_jurisdiction: Optional[str] = None,
 ) -> FactBase:
@@ -1485,6 +1486,11 @@ async def ingest_company_data(
     if probed_items:
         hiring_items.extend(probed_items)
 
+    # Postings already stored are part of the evidence set the brief is built
+    # from; reload them so a run that fetched nothing new keeps the same fact
+    # base — and the same evidence fingerprint — as the run that stored them.
+    hiring_items = _merge_reused_facts(list(stored_hiring or []), hiring_items)
+
     incidental, incidental_stats = harvested
     if incidental and window.needs_fetch:
         incidental = await corroborate_incidental_facts(
@@ -1510,7 +1516,9 @@ async def ingest_company_data(
     # outlets becomes one entry carrying all five links, and the fuller telling
     # wins because it holds more of the detail.
     if hard_facts:
-        hard_facts, merge_stats = await merge_duplicate_facts(hard_facts)
+        hard_facts, merge_stats = await merge_duplicate_facts(
+            hard_facts, protected=len(stored_facts or [])
+        )
         logger.info(
             "Hard fact merge | before=%s | after=%s",
             merge_stats["considered"],

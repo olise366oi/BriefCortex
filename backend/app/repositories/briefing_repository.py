@@ -409,3 +409,34 @@ class EvidenceRepository:
         if added:
             self.db.commit()
         return added
+
+    def keep_only(
+        self,
+        company_id: str,
+        contents: Iterable[str],
+        kind: str = "hard",
+    ) -> int:
+        """Delete stored facts of one kind that the current fact set superseded.
+
+        A merge replaces several stored tellings with one winner. Without this,
+        a later run reloads the superseded rows too, re-merges them (or not,
+        depending on the model) and computes a different evidence fingerprint —
+        so the brief regenerates although nothing new arrived.
+        """
+        keep = {content_hash(content) for content in contents}
+        rows = list(
+            self.db.scalars(
+                select(EvidenceFact).where(
+                    EvidenceFact.company_id == company_id,
+                    EvidenceFact.kind == kind,
+                )
+            ).all()
+        )
+        removed = 0
+        for row in rows:
+            if row.content_hash not in keep:
+                self.db.delete(row)
+                removed += 1
+        if removed:
+            self.db.commit()
+        return removed

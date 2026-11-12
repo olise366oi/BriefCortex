@@ -156,6 +156,7 @@ async def _generate_live_report(
     evidence = EvidenceRepository(db)
     stored = evidence.list_by_kind(company_id, "hard")
     stored_opinions = evidence.list_by_kind(company_id, "opinion")
+    stored_hiring = evidence.list_by_kind(company_id, "hiring")
     coverage_end = evidence.coverage_end(company_id)
     known_urls = evidence.known_urls(company_id)
 
@@ -175,6 +176,14 @@ async def _generate_live_report(
         )
         for row in stored_opinions
     ]
+    stored_hiring_items = [
+        FactItem(
+            content=row.content,
+            source_url=row.source_url,
+            publish_date=row.publish_date,
+        )
+        for row in stored_hiring
+    ]
 
     logger.info(
         "Evidence reuse | company_id=%s | stored_facts=%s | stored_opinions=%s | known_urls=%s | coverage_end=%s",
@@ -190,6 +199,7 @@ async def _generate_live_report(
         coverage_end=coverage_end,
         stored_facts=stored_items,
         stored_opinions=stored_opinion_items,
+        stored_hiring=stored_hiring_items,
         known_urls=known_urls,
     )
 
@@ -209,6 +219,34 @@ async def _generate_live_report(
     added_opinions = evidence.add_many(
         company_id, _payload(fact_base.analyst_opinions), kind="opinion"
     )
+    # Stored facts must equal the fact set the brief was built from. A merge
+    # replaces several tellings with one winner, and leaving the superseded rows
+    # behind is what made a later run reload a different set, miss the evidence
+    # fingerprint and regenerate an unchanged brief.
+    pruned = evidence.keep_only(
+        company_id, [item.content for item in fact_base.hard_facts], kind="hard"
+    )
+    # Postings are evidence too: they reach the analysis, so they belong in the
+    # fingerprint. Leaving them out of the store made every later run look like a
+    # different evidence set (postings 11 → 0) and regenerate an unchanged brief.
+    added_hiring = evidence.add_many(
+        company_id, _payload(fact_base.hiring), kind="hiring"
+    )
+    pruned_hiring = evidence.keep_only(
+        company_id, [item.content for item in fact_base.hiring], kind="hiring"
+    )
+    if pruned or pruned_hiring:
+        logger.info(
+            "Evidence pruned | company_id=%s | superseded_facts=%s "
+            "| superseded_hiring=%s",
+            company_id,
+            pruned,
+            pruned_hiring,
+        )
+    if added_hiring:
+        logger.info(
+            "Hiring evidence stored | company_id=%s | new=%s", company_id, added_hiring
+        )
 
     # URL identity outlives the fact bodies it describes, so a purged article
     # still counts as read next time instead of being fetched again.
@@ -459,11 +497,13 @@ async def _process_job(briefing_id: uuid.UUID, settings: Settings) -> None:
                 finally:
                     logger.info(
                         "Briefing token usage | id=%s | calls=%s | prompt_tokens=%s "
-                        "| completion_tokens=%s | total_tokens=%s",
+                        "| completion_tokens=%s | cached_prompt_tokens=%s "
+                        "| total_tokens=%s",
                         briefing_id,
                         totals["calls"],
                         totals["prompt_tokens"],
                         totals["completion_tokens"],
+                        totals["cached_prompt_tokens"],
                         totals["prompt_tokens"] + totals["completion_tokens"],
                     )
 
