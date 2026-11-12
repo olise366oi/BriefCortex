@@ -487,11 +487,15 @@ evidence served the stored brief in **7.3s with zero model calls**.
 
 Misses themselves are reduced in three places: the request cache (same company,
 objective and meeting day), the evidence fingerprint (same facts, whatever the
-meeting date), and the gateway request cache. The gateway layer is **opt-in**:
-`bifrost/config.json` in this repository ships `plugins: []`, so L4 replays
-nothing until `semantic_cache` is enabled (direct mode, `dimension: 1`, with a
-vector store). The enabling recipe is in the
-[policy package README](bifrost-cache-policy/README.md).
+meeting date), and the gateway request cache. The repository **enables** L4:
+`bifrost/config.json` runs `semantic_cache` in direct (hash) mode
+(`dimension: 1`, Redis vector store), so an identical stage call replays instead
+of calling the provider. Because `config_store` is enabled, that file seeds the
+store: after the first start, change the plugin row through the UI or
+`/api/plugins` (or wipe `bifrost/config.db`) — editing the file alone no longer
+overrides an existing row. Measured on KPIT: a re-run whose findings prompt was
+unchanged came back from the gateway in 1ms with 11,136 prompt tokens served
+from cache, and the run cost 33k tokens instead of 85k.
 
 ### 9. Tested, Not Vibes
 

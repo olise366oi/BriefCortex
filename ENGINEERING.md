@@ -463,8 +463,13 @@ TTL. Run in **direct-only** mode (`dimension: 1`, no `provider`) it is exact
 hash matching, and the key and TTL arrive per request — verified against a stock
 `maximhq/bifrost:v2.4.0` container: first request `x-bifrost-cache-hit=false`,
 identical second request `true`, refreshed evidence or objective `false` again.
-`bifrost/config.json` in this repository therefore leaves the plugin disabled;
-enabling it is a deployment decision, documented in the package README.
+`bifrost/config.json` in this repository ships the plugin enabled, in direct
+(`dimension: 1`) mode against the Redis Stack vector store, so an identical
+stage call is replayed instead of calling the provider. With `config_store`
+enabled the file is a seed: an existing store row wins until it is changed
+through the UI/`/api/plugins` or the store is reset. Measured on KPIT: the
+findings call replayed in 1ms with 11,136 prompt tokens served from the cache,
+and the re-run cost 33k tokens against 85k for the original run.
 
 **What a brief costs.** Every call reports the provider's `usage`, which
 `services/token_usage.py` accumulates per briefing (a ContextVar, so concurrent
