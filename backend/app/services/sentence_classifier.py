@@ -11,7 +11,7 @@ from typing import List, Literal
 
 from pydantic import BaseModel, Field
 
-from app.services.llm_client import build_client
+from app.services.llm_client import build_client, no_reasoning
 from app.services.logger_service import get_logger
 
 logger = get_logger("sentence_classifier")
@@ -68,6 +68,7 @@ async def classify_sentences(sentences: List[str], context: str) -> List[str]:
             ],
             response_format={"type": "json_object"},
             temperature=0.0,
+            **no_reasoning(),
         )
         content = response.choices[0].message.content or ""
         verdicts = SentenceLabels.model_validate_json(content)

@@ -87,6 +87,17 @@ async def llm_slot():
         yield
 
 
+def no_reasoning() -> dict:
+    """Extra request kwargs for a classification call.
+
+    deepseek-flash reasons by default and bills those tokens as completion:
+    measured, a five-token JSON verdict cost 99 completion tokens with reasoning
+    on and 5 with it off. A label ("same / different", "primary / unrelated")
+    does not need a chain of thought, so the mechanical calls opt out.
+    """
+    return {"reasoning_effort": "none"}
+
+
 class _LimitedCompletions:
     """``client.chat.completions`` with every call taking a slot first."""
 
@@ -100,11 +111,22 @@ class _LimitedCompletions:
         if usage is not None:
             prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
             completion_tokens = getattr(usage, "completion_tokens", 0) or 0
-            token_usage.record(prompt_tokens, completion_tokens)
+            cached_prompt_tokens = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
+            if not cached_prompt_tokens:
+                details = getattr(usage, "prompt_tokens_details", None)
+                if details is not None:
+                    cached_prompt_tokens = (
+                        getattr(details, "cached_tokens", 0) or 0
+                    )
+            token_usage.record(
+                prompt_tokens, completion_tokens, cached_prompt_tokens
+            )
             logger.debug(
-                "LLM usage | prompt_tokens=%s | completion_tokens=%s",
+                "LLM usage | prompt_tokens=%s | completion_tokens=%s | "
+                "cached_prompt_tokens=%s",
                 prompt_tokens,
                 completion_tokens,
+                cached_prompt_tokens,
             )
         return response
 

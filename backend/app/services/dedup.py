@@ -17,7 +17,7 @@ from typing import List, Sequence
 
 from pydantic import BaseModel, Field
 
-from app.services.llm_client import build_client
+from app.services.llm_client import build_client, no_reasoning
 from app.services.logger_service import get_logger
 from app.models.fact_base import FactItem
 
@@ -317,6 +317,7 @@ async def confirm_same_facts(
                     ],
                     response_format={"type": "json_object"},
                     temperature=0.0,
+                    **no_reasoning(),
                 )
                 content = response.choices[0].message.content or ""
                 verdicts = PairVerdicts.model_validate(json.loads(content))
@@ -345,6 +346,8 @@ async def confirm_same_facts(
 
 async def merge_duplicate_facts(
     facts: Sequence[FactItem],
+    *,
+    protected: int = 0,
 ) -> tuple[List[FactItem], dict]:
     """Collapse facts that say the same thing into one, keeping every source.
 
@@ -354,10 +357,16 @@ async def merge_duplicate_facts(
     shorter entry's source moves into the winner's ``also_reported_by`` list so
     the reader still has every link.
 
+    ``protected`` is the number of leading facts already stored from an earlier
+    run. Pairs between two protected facts are not re-asked: those facts were
+    merged when they were stored, and asking the model about them again produced
+    different verdicts on a later run — which changed the merged fact set, and
+    with it the evidence fingerprint that decides whether inference runs at all.
+
     Returns the merged list and counters describing what happened.
     """
     stats = {"considered": len(facts), "merged": 0, "kept": 0}
-    if len(facts) < 2:
+    if len(facts) < 2 or len(facts) <= protected:
         return list(facts), stats
 
     texts = [item.content for item in facts]
@@ -365,6 +374,13 @@ async def merge_duplicate_facts(
     # loop, otherwise the CPU bound blocks every other stage of the ingestion
     # (the same reason body extraction moved to a worker pool).
     pairs = await asyncio.to_thread(find_candidates_global, texts)
+    # Only a pair that involves at least one newly collected fact is worth a
+    # model call; two stored facts are already one claim or two distinct ones.
+    pairs = [
+        pair
+        for pair in pairs
+        if pair.existing_index >= protected or pair.incoming_index >= protected
+    ]
     confirmed = await confirm_same_facts(texts, texts, pairs) if pairs else []
     if not pairs:
         logger.info(

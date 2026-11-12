@@ -24,7 +24,12 @@ _TOTALS: "ContextVar[Optional[Dict[str, int]]]" = ContextVar(
 @contextmanager
 def usage_run() -> Iterator[Dict[str, int]]:
     """Collect token usage for the duration of one briefing run."""
-    totals = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+    totals = {
+        "calls": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cached_prompt_tokens": 0,
+    }
     token = _TOTALS.set(totals)
     try:
         yield totals
@@ -32,7 +37,11 @@ def usage_run() -> Iterator[Dict[str, int]]:
         _TOTALS.reset(token)
 
 
-def record(prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+def record(
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    cached_prompt_tokens: int = 0,
+) -> None:
     """Add one call's usage to the active run, when one is active."""
     totals = _TOTALS.get()
     if totals is None:
@@ -40,3 +49,4 @@ def record(prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
     totals["calls"] += 1
     totals["prompt_tokens"] += int(prompt_tokens or 0)
     totals["completion_tokens"] += int(completion_tokens or 0)
+    totals["cached_prompt_tokens"] += int(cached_prompt_tokens or 0)

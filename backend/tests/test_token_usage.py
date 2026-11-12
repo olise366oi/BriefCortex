@@ -15,6 +15,7 @@ from app.services import llm_client, token_usage
 class _Usage:
     prompt_tokens = 120
     completion_tokens = 30
+    prompt_cache_hit_tokens = 40
 
 
 class _Response:
@@ -36,7 +37,12 @@ def test_usage_is_summed_for_one_run():
         token_usage.record(100, 20)
         token_usage.record(50, 5)
 
-    assert totals == {"calls": 2, "prompt_tokens": 150, "completion_tokens": 25}
+    assert totals == {
+        "calls": 2,
+        "prompt_tokens": 150,
+        "completion_tokens": 25,
+        "cached_prompt_tokens": 0,
+    }
 
 
 def test_record_outside_a_run_is_a_noop():
@@ -45,11 +51,26 @@ def test_record_outside_a_run_is_a_noop():
     with token_usage.usage_run() as totals:
         pass
 
-    assert totals == {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+    assert totals == {
+        "calls": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cached_prompt_tokens": 0,
+    }
 
 
 def test_the_client_wrapper_records_what_the_provider_reports():
     with token_usage.usage_run() as totals:
         asyncio.run(_client().chat.completions.create())
 
-    assert totals == {"calls": 1, "prompt_tokens": 120, "completion_tokens": 30}
+    assert totals == {
+        "calls": 1,
+        "prompt_tokens": 120,
+        "completion_tokens": 30,
+        "cached_prompt_tokens": 40,
+    }
+
+
+def test_mechanical_calls_opt_out_of_reasoning():
+    # deepseek-flash bills reasoning as completion; a label does not need it.
+    assert llm_client.no_reasoning() == {"reasoning_effort": "none"}

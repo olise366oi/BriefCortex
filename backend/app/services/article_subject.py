@@ -16,7 +16,7 @@ from typing import List, Literal, Sequence
 
 from pydantic import BaseModel, Field
 
-from app.services.llm_client import build_client
+from app.services.llm_client import build_client, no_reasoning
 from app.services.logger_service import get_logger
 
 logger = get_logger("article_subject")
@@ -142,6 +142,7 @@ async def classify_article_subjects(
                     ],
                     response_format={"type": "json_object"},
                     temperature=0.0,
+                    **no_reasoning(),
                 )
                 content = response.choices[0].message.content or ""
                 parsed = SubjectBatch.model_validate(json.loads(content))
