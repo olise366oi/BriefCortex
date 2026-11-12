@@ -19,12 +19,14 @@ services:
     # Provider credentials come from this file, not from the parent shell: the
     # backend's keys live in machine-level environment variables that a
     # container cannot inherit, so the gateway needs its own copy on disk.
-    # .env.example is used directly because backend/.env does not exist yet; a
-    # real .env takes precedence when someone creates one.
+    # Compose gives the *later* env_file precedence, so the committed .env.example
+    # (schema only, empty values) is listed first and a real .env wins when it
+    # exists. Listing them the other way round left the gateway with an empty
+    # DEEPSEEK_API_KEY and every request failing with "no valid keys".
     env_file:
-      - path: ./backend/.env
-        required: false
       - path: ./backend/.env.example
+        required: false
+      - path: ./backend/.env
         required: false
     environment:
       APP_PORT: 8080
