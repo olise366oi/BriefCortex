@@ -1,4 +1,4 @@
-﻿# BriefCortex
+# BriefCortex
 
 **Time-sliced competitive intelligence for high-stakes commercial meetings.**
 
@@ -51,54 +51,49 @@ thresholds, per-platform link shapes — see **[ENGINEERING.md](ENGINEERING.md)*
 
 <!-- ARCH_DIAGRAM -->
 
-End-to-end data flow. Four cache decisions sit on this path, retrieval is four
-concurrent lanes rather than one query, and generation is three stages with the
-audit between them. Per-module detail is in the module map below and in
+One request path: four retrieval lanes run in parallel, a gate turns them into a
+fact base, four cache decisions sit on the path, and generation runs three
+stages with the audit between them. Per-module detail is in
 **[ENGINEERING.md](ENGINEERING.md)**.
 
 ```mermaid
-flowchart TD
-    UI[Frontend] --> API[FastAPI: 202 + poll]
-    API --> L1{{L1 request cache<br/>company + objective + meeting day}}
-    L1 -- hit --> Serve[Brief delivered]
-    L1 -- miss --> R[Retrieval plan]
+flowchart LR
+    UI["Web UI<br/>submit · poll"] --> API["FastAPI<br/>202 + background job"]
 
-    subgraph RET["four lanes, asyncio.gather"]
-        direction LR
-        N["news<br/>dated · publisher-scoped"]
-        O["open domain<br/>regulator · careers"]
-        J["LinkedIn jobs"]
-        Loc["local language<br/>national press only"]
-    end
+    API --> L1{"L1 request cache<br/>company + objective + meeting day"}
+    L1 -- hit --> OUT(["Brief delivered"])
+    L1 -- miss --> LANES
 
-    R --> N & O & J & Loc
-    RET --> Clean["Scope + quality gate<br/>window filter · trust order · subject routing"]
-    Clean --> FB[(FactBase<br/>facts · opinions · hiring · conflicts)]
+    LANES["Retrieval<br/>4 lanes · asyncio.gather<br/>news · open · jobs · local"] --> GATE["Gate<br/>window · trust · subject"]
+    GATE --> FB[("FactBase<br/>facts · hiring · conflicts")]
 
-    FB --> L2{{L2 evidence fingerprint}}
-    L2 -- miss --> Gen
-    L2 -- hit --> L3{{L3 contradiction check}}
-    L3 -- stands --> Serve
-    L3 -- contradicted --> Gen
+    FB --> L2{"L2 evidence fingerprint"}
+    L2 -- hit --> L3{"L3 contradiction check"}
+    L3 -- stands --> OUT
+    L2 -- miss --> GEN
+    L3 -- contradicted --> GEN
 
-    subgraph Gen["Generation — audit between"]
-        direction TB
-        F[1 findings] --> A[audit] --> An[2 analysis] --> Rec[3 recommendation]
-    end
+    GEN["Generation<br/>findings → audit → analysis → recommendation"] --> L4{"L4 gateway cache<br/>key + graded TTL"}
+    L4 -- miss --> LLM["Model<br/>schema-validated · retried"]
+    L4 -- hit --> SAVE
+    LLM --> SAVE[("Report + evidence<br/>+ fingerprint")]
+    SAVE --> OUT
 
-    Gen --> GW{{L4 Bifrost gateway<br/>cache key + graded TTL}}
-    GW -- hit --> Replay[Replayed stage call] --> Save
-    GW -- miss --> LLM[Model]
-    LLM --> Schema{Pydantic schema}
-    Schema -- invalid --> LLM
-    Schema -- valid --> Save[(Report + evidence<br/>+ fingerprint)]
-    Save --> Serve
+    classDef cache fill:#fff4d6,stroke:#b58b00,color:#3a2f00
+    classDef stage fill:#e7f0fc,stroke:#3b6ea8,color:#10243d
+    classDef store fill:#e8f5e9,stroke:#2e7d32,color:#10240f
+    class L1,L2,L3,L4 cache
+    class LANES,GATE,GEN,LLM stage
+    class FB,SAVE store
 ```
 
-Nothing about the evidence is re-fetched that is already stored, and no claim
-reaches the recommendation without passing the audit.
-
-*(The diagram is the canonical one; the module map and design decisions below carry the detail.)*
+**The four cache decisions.** L1 is an exact-request key (company + objective +
+meeting day); L2 is the evidence fingerprint (the same facts produce the same
+brief even when the meeting moved); L3 refuses reuse when new evidence
+contradicts the stored facts; L4 is the Bifrost gateway key and evidence-graded
+TTL. A hit at L1 serves the stored brief, and a hit at L2/L3 serves it only
+while it still stands. Nothing about the evidence is re-fetched that is already
+stored, and no claim reaches the recommendation without passing the audit.
 
 ### 1. Freshness: A 30-Day Window, Checked Twice
 
@@ -463,6 +458,8 @@ The repo ships with `pytest` coverage for the prompt/schema contract, the confli
 - Reverse-direction pairs must produce a description with the correct fact on each side.
 - Negative-signal keywords match whole words, so `miss` cannot match `mission`.
 - Two distinct facts sharing an opening clause are both kept; only a long word-for-word extension replaces the shorter telling.
+- A deduplicated chain collapses transitively, the fuller telling wins, every source survives, and nothing merges without the model's confirmation.
+- Subject routing and semantic deduplication are asserted to run their batches concurrently, and a failed subject batch degrades only that batch.
 - The cache TTL classifies evidence by whole word, so `third quarter` is not read as a hiring signal.
 
 ---
@@ -504,10 +501,14 @@ BriefCortex/
 | `services/company_identity.py` | Registry lookup for jurisdiction and legal form (GLEIF) |
 | `services/entity_search.py` | Turns the caller's description into confirmable company candidates |
 | `services/entity_disambiguation.py` | Rejects possible facts that belong to a different same-named company |
+| `services/counterparty.py` | Reads the objective for the other company and adds queries about its own condition |
 | `services/legal_signals.py` | Jurisdiction-aware searches for legal and regulatory exposure |
 | `services/source_rules.py` | Publisher registry and per-publisher extraction rules |
 | `services/publisher_filter.py` | URL scoping, article-body location, text extraction, plain-text recovery |
+| `services/long_document.py` | Segments a filing, scores blocks against the objective, keeps the sections that answer it |
+| `services/media_trust.py` | Country → press list and language, refused hosts, national-press trust ordering |
 | `services/fact_extraction.py` | Inverted-pyramid split, dedup, source ordering |
+| `services/coverage.py` | Coverage ledger: levels, missing lanes, manual checks, search failures |
 | `services/freshness.py` | Publication dates, date fallback, reporting-period checks |
 | `services/article_subject.py` | Routes each article by who it is about, using the caller's description |
 | `services/sentence_classifier.py` | Fact vs opinion labeling for incidental sentences |
@@ -516,11 +517,15 @@ BriefCortex/
 | `services/hiring.py` | Line-level hiring detection, careers-URL matching, LinkedIn and hiring queries |
 | `services/job_postings.py` | Reads roles from a careers page's schema.org `JobPosting` markup, including per-platform detail-link discovery |
 | `services/dedup.py` | Two-stage fact merging that keeps every source |
+| `services/own_company_scan.py` | The caller's own market position: quote plus the coverage that moved it |
+| `services/own_profile.py` | The caller's own company profile, stored and read back for the recommendation |
+| `services/internal_material.py` | Caller-supplied internal material, used in the recommendation and never as evidence |
 | `services/retention.py`, `retention_runner.py`, `scheduler.py` | Evidence expiry and URL decay, run on a daily loop |
 | `services/cache.py` | Exact-request cache key and TTL |
 | `services/evidence_fingerprint.py` | Evidence-set fingerprint, so a brief is reused when the facts match |
 | `services/cache_invalidation.py` | Cross-set contradiction check that invalidates a reusable brief |
 | `services/analysis.py` | LLM report generation, prompt assembly, audit and ordering |
+| `services/report_stages.py` | The three generation stages and the prompt/schema contract each one owns |
 | `services/report_audit.py` | Pre-delivery check: a claim about another company, an unknown source, or a figure the evidence never states, is removed |
 | `services/number_check.py` | Deterministic figure check: every number a claim states must appear somewhere in the evidence |
 | `services/report_order.py` | Key events first, then newest — the reading order of `news` |
@@ -613,7 +618,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 533 passed.
+Expected: 653 passed.
 
 The gateway policy package ships its own suite, runnable without this backend:
 
@@ -621,7 +626,7 @@ The gateway policy package ships its own suite, runnable without this backend:
 cd bifrost-cache-policy
 pip install -e .
 pip install pytest
-python -m pytest tests -v              # 64 passed, 6 skipped (live cases)
+python -m pytest tests -v              # 68 passed, 6 skipped (live cases)
 ```
 
 > Test count is maintained locally while the frontend suite is still being

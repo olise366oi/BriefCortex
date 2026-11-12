@@ -183,6 +183,11 @@ A headline that names the company **overrides** the body reading
 record revenue" whose body also discussed peers came back as `comparison`, so its
 facts were offered as unconfirmed leads instead of as news.
 
+Excerpts are classified in concurrent batches of `SUBJECT_BATCH_SIZE` (20), not
+in one request. The batch bounds two things: a single call's latency, and the
+cost of a malformed reply — a failed batch degrades only its own articles to
+`comparison` instead of the whole run.
+
 ### 3.5 Same-name separation
 
 Two levers, both needed:
@@ -334,8 +339,15 @@ so the fact base gets the leverage without absorbing commentary. Signals match o
 word boundaries plus inflections: `miss` cannot fire inside `mission`.
 
 The same fact from five outlets is stored once with all five links in
-`also_reported_by`; a syndicated re-telling replaces the shorter version only when
-the shared opening is long enough to be the same telling.
+`also_reported_by`. Two passes do that. During ingestion, a syndicated re-telling
+replaces the shorter version when the shared opening is long enough to be the same
+telling (`find_prefix_twin`). The semantic merge afterwards proposes candidate
+pairs by normalised lexical score — normalized once per fact, capped at
+`MAX_PARTNERS_PER_FACT` partners per fact — asks the model to confirm them in
+concurrent batches, and groups the confirmed pairs with union-find, so a
+transitive chain (A=B, B=C) collapses even when A and C were never compared. The
+fuller telling wins, and the model's failure keeps every fact: a duplicate is
+recoverable, a deleted distinct fact is not.
 
 `services/forward_looking.py` removes stated intent from the evidence before the
 model reasons: a promise is not an event. It fires on intent grammar ("will",
@@ -468,15 +480,16 @@ same prompt and repeat the same mistake.
 
 ## 10. Configuration
 
-`core/config.py`. `.env` then `.env.example`, with real environment variables
-winning. A bare `postgresql://` URL is pinned to `psycopg2`, because SQLAlchemy 2
-resolves the bare scheme to psycopg 3, which needs libpq and fails at import on a
-machine that has only psycopg2.
+`core/config.py`. `.env` wins over `.env.example`, and real environment variables
+win over both: the app loads both files (`.env.example` is the clean-checkout
+fallback) with the later file taking precedence. A bare `postgresql://` URL is
+pinned to `psycopg2`, because SQLAlchemy 2 resolves the bare scheme to psycopg 3,
+which needs libpq and fails at import on a machine that has only psycopg2.
 
 ## 11. Testing
 
-`backend/tests/`, 533 tests, plus `bifrost-cache-policy/tests/`, 74. What they are
-for:
+`backend/tests/`, 653 tests, plus `bifrost-cache-policy/tests/`, 74 collected (68
+pass, 6 live cases skipped unless `BIFROST_URL` is set). What they are for:
 
 - **Live-run regressions, not invented cases.** Every hiring-filter test uses a
   line an actual run produced. Every careers-URL case is a shape measured on a

@@ -35,7 +35,7 @@ BriefCortex/
 │   │   ├── db/models.py             # BriefingRecord, EvidenceFact, …
 │   │   ├── repositories/            # BriefingRepository, EvidenceRepository
 │   │   ├── models/                  # Pydantic schemas (briefing, fact_base)
-│   │   ├── services/                # retrieval, analysis, audit, caching
+│   │   ├── services/                # retrieval · cleaning · facts · generation · audit · cache
 │   │   └── mock/
 │   ├── migrations/                  # Alembic revisions
 │   └── tests/
@@ -54,7 +54,7 @@ docker compose up -d db
 # Backend
 cd backend
 pip install -r requirements.txt
-cp .env.example .env
+cp .env.example .env          # optional: .env.example alone is loaded as a fallback
 python -m alembic upgrade head     # schema is managed by migrations, not create_all
 uvicorn app.main:app --reload --port 8000
 
@@ -63,6 +63,10 @@ cd frontend
 cp .env.example .env.local
 npm install
 npm run dev
+
+# Tests (keep the local Postgres up: repository cases open a real session)
+cd backend
+python -m pytest -q            # 653 tests
 ```
 
 ## Where to Add Features
@@ -95,6 +99,12 @@ npm run dev
 - Evidence is persisted separately (`evidence_facts`, `evidence_coverage`), so a
   re-run searches only the days not yet covered instead of the whole window.
 - Conflict detection must never be serialized into the LLM prompt.
+- Configuration precedence is real env vars > `backend/.env` > `backend/.env.example`
+  (the example is loaded as a fallback so a clean checkout runs). Never put keys in
+  the committed `.env.example`.
+- `/api/debug` is mounted only while `DEBUG=true`; it exposes pipeline internals and
+  bypasses the job queue.
+- There is no auth by design: the service is loopback/demo-scoped, not public-ready.
 
 ## What NOT to Do
 
