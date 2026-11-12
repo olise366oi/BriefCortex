@@ -484,6 +484,7 @@ BriefCortex/
 │   ├── migrations/           # Alembic revisions
 │   └── tests/
 ├── docs/                     # CLAUDE, KARPATHY
+├── .github/workflows/        # CI: backend + gateway-policy suites
 ├── bifrost-cache-policy/     # Standalone gateway cache rules (pip-installable)
 └── docker-compose.yml        # Postgres, Bifrost gateway, Redis Stack
 ```
