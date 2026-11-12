@@ -68,6 +68,36 @@ STALE_DATE_RE = re.compile(
     r"October|November|December)\s+(20\d\d)\b"
 )
 
+# Publishers write dates in the order the writer's own language uses: "26 Aug
+# 2013" and "Aug. 2013" both appeared in one measured YKK run. The full-month
+# pattern above missed both, so a docket that filed in 2013 and closed in 2017
+# was filed as current evidence in a 30-day window.
+ABBREVIATED_MONTH_INDEX = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11,
+    "dec": 12,
+}
+
+STALE_SHORT_DATE_RE = re.compile(
+    r"\b(?:(\d{1,2})(?:st|nd|rd|th)?\s+,?\s+)?"
+    r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sept|Sep|Oct|Nov|Dec)[a-z]*\.?,?\s+(20\d\d)\b",
+    re.IGNORECASE,
+)
+
+# Numeric dates, which no month-name pattern reaches: "(Signed by Judge Gregory
+# H. Woods on 7/30/2020)" and "2020-07-30". A measured YKK run kept a 2020
+# judgment in a 30-day window because its only date was written this way.
+#
+# Two-digit years are included because court PDFs stamp them: a 2014 judgment
+# carried "Filed 01/24/14" and nothing else, so the whole filing read as current.
+# They are read as 20xx, which is the only range a document stamped this way can
+# mean, and only in the slash form — an ISO year is never abbreviated.
+STALE_NUMERIC_DATE_RE = re.compile(
+    r"\b(?:(?<!\d)(\d{1,2})/(\d{1,2})/(\d{4})(?!\d))"
+    r"|(?:(?<!\d)(\d{1,2})/(\d{1,2})/(\d{2})(?!\d))"
+    r"|\b(20\d\d)-(\d{1,2})-(\d{1,2})\b"
+)
+
 COMPARISON_MARKERS = (
     "since",
     "below",
@@ -175,6 +205,62 @@ def date_from_url(url: str) -> Optional[datetime]:
     return _date_from_page(url)
 
 
+# The document's own filing stamp. A court PDF carries "Filed 01/24/14" or
+# "Document 136 Filed 01/24/2014" in its header and nowhere else — no slug date,
+# no page metadata — so a 2014 judgment arrived undated, survived the window
+# filter, and was reported as current evidence about a live dispute.
+_DOCUMENT_STAMP_RE = re.compile(
+    r"(?:Filed|Dated)\s*:?\s*(?:[A-Z][a-z]+,?\s+)?"
+    r"(?:(?<!\d)(\d{1,2})/(\d{1,2})/(\d{4}|\d{2})(?!\d)"
+    r"|(20\d\d)-(\d{1,2})-(\d{1,2})\b)"
+    r"|\(Signed\s+by[^()\n]{0,80}?\s+on\s+(?<!\d)(\d{1,2})/(\d{1,2})/(\d{4}|\d{2})(?!\d)\)",
+    re.IGNORECASE,
+)
+
+
+def date_from_body(text: str) -> Optional[datetime]:
+    """Recover a publication date from the document's own text.
+
+    Used only when neither the search result, the URL slug nor the page metadata
+    yielded one. A filing states its date in the header, and a date the document
+    states about itself is better evidence than leaving it undated — an undated
+    result is kept by the window filter, which is how a 2014 judgment reached a
+    brief on a 2026 meeting.
+    """
+    if not text:
+        return None
+
+    match = _DOCUMENT_STAMP_RE.search(text)
+    if not match:
+        return None
+
+    groups = match.groups()
+    numeric = groups[:6]
+    signed = groups[6:]
+
+    if signed and signed[0]:
+        month_text, day_text, year_text = signed
+    elif numeric[0]:
+        month_text, day_text, year_text = numeric[0], numeric[1], numeric[2]
+    elif numeric[3]:
+        year, month, day = int(numeric[3]), int(numeric[4]), int(numeric[5])
+        try:
+            return datetime(year, month, day, tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    else:
+        return None
+
+    year = int(year_text)
+    if year < 100:
+        year += 2000
+
+    try:
+        return datetime(year, int(month_text), int(day_text), tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
 def is_stale_period(text: str, window_start: str) -> bool:
     """Return True when a sentence reports a period before the search window.
 
@@ -193,12 +279,54 @@ def is_stale_period(text: str, window_start: str) -> bool:
         if int(year_text) < window_year:
             return True
 
+    # Every date the sentence states, in whichever form the writer used. The two
+    # patterns overlap — "April 2025" is also matched by the abbreviation one —
+    # so a pair is judged once: a comparison anchor is clearable, and reading the
+    # same date twice would turn a cleared date into a stale one.
+    date_hits: List[tuple[int, int, str]] = []
     for month_text, year_text in STALE_DATE_RE.findall(text):
-        month = MONTH_INDEX[month_text.lower()]
-        year = int(year_text)
+        date_hits.append((int(year_text), MONTH_INDEX[month_text.lower()], month_text))
+
+    for _day_text, month_text, year_text in STALE_SHORT_DATE_RE.findall(text):
+        month = ABBREVIATED_MONTH_INDEX.get(month_text.lower())
+        if month is None:
+            continue
+        date_hits.append((int(year_text), month, month_text))
+
+    # Numeric dates, in both orders. A month-name comparison anchor cannot clear
+    # one of these, because there is no month word to look behind from, so a
+    # numeric date before the window is simply stale.
+    #
+    # "7/30/2020" is unambiguous only because 30 cannot be a month; where both
+    # numbers fit, the US order is assumed, which is what the measured dockets
+    # (and the SEC filings) use.
+    for first, second, four_year, short_first, short_second, short_year, iso_year, iso_month, _iso_day in (
+        STALE_NUMERIC_DATE_RE.findall(text)
+    ):
+        if four_year:
+            year, left, right = int(four_year), int(first), int(second)
+        elif short_year:
+            year = 2000 + int(short_year)
+            left, right = int(short_first), int(short_second)
+        else:
+            year, left, right = int(iso_year), int(iso_month), 0
+        if not four_year and not short_year:
+            month = int(iso_month)
+        elif left > 12 and right <= 12:
+            month = right
+        else:
+            month = left
+        if 1 <= month <= 12:
+            date_hits.append((year, month, ""))
+
+    judged: set[tuple[int, int]] = set()
+    for year, month, month_text in date_hits:
+        if (year, month) in judged:
+            continue
+        judged.add((year, month))
 
         if year < window_year:
-            if _is_comparison_anchor(text, month_text, year_text):
+            if month_text and _is_comparison_anchor(text, month_text, str(year)):
                 continue
             return True
 
@@ -245,6 +373,9 @@ async def resolve_publish_dates(results: List[dict]) -> List[dict]:
             return
         async with semaphore:
             recovered = await asyncio.to_thread(date_from_url, url)
+        if recovered is None:
+            # A filing states its own date and often nowhere else.
+            recovered = date_from_body(str(result.get("raw_content") or ""))
         if recovered is not None:
             result["published_date"] = recovered.isoformat()
             logger.info("Date recovered | url=%s | %s", url, recovered.date())

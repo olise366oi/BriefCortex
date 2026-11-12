@@ -345,6 +345,7 @@ def _build_evidence_summary(fact_base: FactBase) -> EvidenceSummary:
             lanes_missing=list(coverage.lanes_missing),
             notes=list(coverage.notes),
             checks_to_run=list(coverage.checks_to_run),
+            search_failures=list(coverage.search_failures),
         ),
         conflicts=[
             EvidenceConflict(

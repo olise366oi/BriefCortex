@@ -1,0 +1,61 @@
+---
+description: "Backend low-level design guardrail. Enforce a design draft and modular boundaries before changing backend code; block hacky, spaghetti-prone implementations. Apply before writing or changing services, repositories, models, schemas, or data-access code, and when adding a design pattern."
+globs: ["**/*.py", "**/src/**/*.ts", "**/services/**", "**/repositories/**", "**/models/**"]
+alwaysApply: false
+---
+
+# Backend LLD Guardian (Cursor rule)
+
+Apply this rule when making backend changes. Match rigor to change size.
+
+## Change triage
+
+- **Trivial** (typo, config value, single-function bug fix): check scope and hack list only.
+- **Standard** (one module, one responsibility): write a short design sketch, then implement, then self-check.
+- **Large** (cross-module, new abstraction/pattern, data-model or contract change): full design draft and gate review before any implementation code.
+
+## Workflow
+
+1. **Recon:** read existing modules and callers; map current dependency direction. Do not write code yet.
+2. **Design draft:** goal/non-goals, affected files, module boundaries, signatures/types, failure paths, test plan. If a pattern is used, name the problem shape and why a simpler solution does not fit.
+3. **Gate:** the draft must pass the rules below before coding. Revise the draft rather than coding around a failed design.
+4. **Implement:** stay inside the listed affected surface. Anything outside it requires updating the design first. Reuse existing patterns; inject collaborators.
+5. **Self-check:** review the actual diff against the checklist at the bottom. Failures are reported with file and line; do not mark done while a blocking item fails.
+
+## Layering and modularity
+
+- Dependencies point inward: handlers → services → repositories → models. No reverse calls, no cycles.
+- Handlers parse input and call one service; services own business rules and call repositories; repositories own queries; models hold plain structures.
+- No SQL in services/handlers; no business logic in repositories/models.
+- One responsibility per unit; one reason to change.
+- Depend on abstractions; inject collaborators through constructor or parameters. Never construct concrete clients/repositories deep inside a function.
+- No global mutable state shared across modules; config and secrets are injected from the composition root.
+
+## Blocked in shipped code
+
+- Type escape: `any`, unchecked casts, `# type: ignore` used to silence the checker. Validate with a schema instead.
+- Commented-out dead code. Delete it; history lives in git.
+- Magic numbers/strings repeated across modules. Name the constant.
+- Shipped TODO stubs, fake returns, `NotImplementedError` on a live path.
+- Copy-paste blocks across modules. Extract the shared logic.
+- Reaching into another module's internals. Extend its public interface instead.
+- Bare/over-broad `except` that swallows failures. Catch typed expected errors; re-raise unexpected ones.
+- Special-case branches bolted onto a structure instead of changing the structure. Stop and revise the design.
+
+## Size signals
+
+- Function > ~50 lines: split unless explicitly justified.
+- Nesting > 3 levels: extract a helper or early-return.
+- More than ~5 parameters: group into a request/command object.
+
+## Pattern selection
+
+Add a pattern only for a stated problem. Common mappings:
+
+- Conditional optional assembly → Builder; runtime-selected implementation → Factory; swappable algorithm → Strategy; fan-out side effects → Observer; external interface mismatch → Adapter; storage behind a collection interface → Repository; multi-step workflow → Service; wire-boundary shape → DTO; multi-write atomicity → Unit of Work; swappable collaborators → DI.
+
+Do not add a pattern "for future extensibility" with no concrete case.
+
+## Self-check checklist
+
+Scope (diff matches design, no drive-by cleanup) · Modularity (one responsibility, correct direction, no reach-in) · Patterns (justified, no over-engineering) · Hacks (blocked list clean) · Readability (length, nesting, names) · Tests (happy path, failure paths, edge cases). Report each pass/fail/N/A with a reason.

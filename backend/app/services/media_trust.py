@@ -84,10 +84,14 @@ REFUSED_HOSTS: Tuple[str, ...] = (
     # come from the vendor's JSON endpoint, never from reporter prose.
     "eluta.ca", "jobzmall.com", "talent.com", "neuvoo.com", "jooble.org",
     "workopolis.com", "careerjet.ca", "ca.indeed.com", "jobs.ca",
-    # Paid company-profile databases: the visible page is a sales pitch, and
-    # "Gain a 360-degree view … Learn more" was reaching the fact base.
+    # Paid company-profile and patent-litigation databases: the visible page is a
+    # sales pitch plus docket chrome, and "Gain a 360-degree view … Learn more"
+    # was reaching the fact base. Measured on YKK: nine of thirty-seven hard facts
+    # came from a patent database's case page — "Source: Patsnap Litigation Data",
+    # "Something wrong, out of date, or missing on this page?" — while the
+    # underlying dispute was already being reported by legal press.
     "globaldata.com", "dnb.com", "bisnode.com", "moodys.com",
-    "refinitiv.com", "factset.com",
+    "refinitiv.com", "factset.com", "patsnap.com",
     # Wildlife and species pages. The name collides: a run for the outerwear
     # brand returned federal and state "Canada goose" management programmes.
     # These are refused by host so the collision never becomes evidence.

@@ -37,3 +37,7 @@ TEST/
 # Runtime data generated per deployment: learned per-country press lists.
 data/
 backend/data/
+
+# Local Codelf agent workspace (skills read by the Codelf app, not source).
+# The committed copy of these skills lives in .claude/skills/.
+.codelf/

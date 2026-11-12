@@ -3,8 +3,9 @@ from __future__ import annotations
 import re
 from typing import List, Optional
 
+from app.services.hiring import is_careers_url
 from app.services.keywords import match_word
-from app.services.urls import host_of
+from app.services.urls import host_of, url_path
 from app.services.source_rules import (
     HARD_FACT_HEAD_PARAGRAPHS,
     MIN_PARAGRAPH_LENGTH,
@@ -159,7 +160,8 @@ def _split_sentences(paragraphs: List[str]) -> List[str]:
         sentences = [s for s in sentences if s]
 
         if len(sentences) <= 1:
-            out.append(paragraph.strip())
+            if not _is_document_fragment(paragraph):
+                out.append(paragraph.strip())
             continue
 
         # A trailing fragment that never became a sentence ("14.") joins the one
@@ -177,8 +179,52 @@ def _split_sentences(paragraphs: List[str]) -> List[str]:
                 continue
             merged.append(sentence)
 
-        out.extend(merged)
+        # A court filing splits into caption lines — "Defendants.", "No.", "564.",
+        # a comma run of corporate names — and a measured YKK run filed six of
+        # them as facts. They carry no statement, so they are not stored.
+        out.extend(item for item in merged if not _is_document_fragment(item))
     return out
+
+
+# Case-docket fragments. A court PDF splits into lines like "Defendants.",
+# "No.", "564.", and a party list that is only corporation names. None states
+# anything about the business: they are the caption and numbering of a filing.
+_DOCKET_FRAGMENT_RE = re.compile(
+    r"^(?:"
+    r"defendants?\.?|plaintiffs?\.?|"
+    r"no\.?|nos\.?|dkt\.?|"
+    r"(?:v\.|vs\.)\s|"
+    r"order(ed)?\s*[:.]|"
+    r"so\s+ordered\.?|"
+    r"\d{1,4}[.\-–]?|"
+    r"(?:ltd|llc|inc|corp|gmbh|s\.?a\.?r\.?l|pte|co)\.?"
+    r")$",
+    re.IGNORECASE,
+)
+
+# A party list is many company names joined by commas, with no verb anywhere.
+_PARTY_LIST_MIN_NAMES = 3
+
+
+def _is_document_fragment(text: str) -> bool:
+    """True when a stored item is a filing's numbering rather than a statement."""
+    stripped = text.strip()
+    if not stripped:
+        return True
+
+    if _DOCKET_FRAGMENT_RE.match(stripped):
+        return True
+
+    # "YKK ZIPPER INDONESIA, YKK BANGLADESH PTE. LTD., YKK KOREA CO., LTD., …"
+    # A block with no verb and at least three legal-entity suffixes is a caption.
+    if not _has_sentence(stripped):
+        suffixes = len(
+            re.findall(r"\b(?:ltd|llc|inc|corp|gmbh|sarl|pte|co)\b\.?", stripped, re.I)
+        )
+        if suffixes >= _PARTY_LIST_MIN_NAMES:
+            return True
+
+    return False
 
 
 def extract_analyst_opinions(clean_text: str, hard_facts: List[str]) -> List[str]:
@@ -242,13 +288,51 @@ _TABLE_ROW_RE = re.compile(r"^\s*\|?[^|\n]*\|[^|\n]*\|")
 # A row of dashes under a header ("| --- | --- | --- |") is pure formatting.
 _TABLE_RULE_RE = re.compile(r"^[\s|:\-]+$")
 
+# A navigation rail: a chain of links separated by a bullet or a colon. Tavily
+# returns the sidebar as prose, and a measured YKK brief filed a Japanese
+# comparison-site's card and brokerage rails as three hard facts — 200
+# characters of "「年会費無料＆高還元」で選ぶ！" carrying no statement about the
+# company. Detection is the ratio, not the presence of any marker: real Japanese
+# reporting uses "・" for lists too, so only a block that is mostly separators
+# qualifies.
+#
+# Pipes are deliberately **not** separators here. A markdown table is a chain of
+# short fragments too, and it has its own rules; reading "|" as a rail marker
+# turned every small table back into noise and deleted the prose cell inside it.
+_NAV_SEPARATORS = ("・", "·", ":")
+
+
+def _is_navigation_rail(text: str) -> bool:
+    """True when a block is a link rail rather than a sentence."""
+    if not text:
+        return False
+    separators = sum(text.count(marker) for marker in _NAV_SEPARATORS)
+    if separators < 4:
+        return False
+    # A rail is many short fragments; prose is a few long ones.
+    fragments = [
+        fragment for fragment in re.split(r"[・·:]", text) if fragment.strip()
+    ]
+    if len(fragments) < 5:
+        return False
+    average = sum(len(fragment.strip()) for fragment in fragments) / len(fragments)
+    return average < 30
+
+
 # Marketing copy that a vendor page pads its description with. It names the
 # reader's benefit, never the company's situation.
 _MARKETING_RE = re.compile(
     r"(gain a 360|gain access|learn more|request a demo|book a demo|"
     r"sign up for|subscribe to|start your free trial|contact sales|"
     r"premium signals|all rights reserved|cookie policy|"
-    r"why choose us|trusted by \d)",
+    r"why choose us|trusted by \d|"
+    # A vendor's own signup and privacy boilerplate, which a supplier-marketing
+    # page pads its "why we use this supplier" copy with. Measured on YKK: two of
+    # eleven facts from a motorcycle-apparel page were its newsletter consent and
+    # its unsubscribe note.
+    r"by subscribing, you agree|marketing communications|"
+    r"we respect your privacy|you can unsubscribe|opt out at any time|"
+    r"we use cookies|this site uses cookies)",
     re.IGNORECASE,
 )
 
@@ -259,6 +343,29 @@ _FILING_BOILERPLATE_RE = re.compile(
     r"exhibit no\.|^description$|press release of .*, dated|"
     r"forward-looking statements? (in this|contained)|"
     r"this (annual|quarterly) report (contains|includes) forward)",
+    re.IGNORECASE,
+)
+
+# Page footers and copyright rails. A site's own legal furniture states nothing
+# about the company it covered: a measured Law360 block reached the fact base as
+# "© 2026, Portfolio Media, Inc. | About | Contact Us | Careers at Law360 …".
+_PAGE_FOOTER_RE = re.compile(
+    r"(©\s*\d{4}|copyright\s+©|all rights reserved|terms (of use|& conditions)|"
+    r"privacy policy|cookie (settings|policy)|ad choices|site map|"
+    r"accessibility statement|do not sell my|subscribe to our newsletter)",
+    re.IGNORECASE,
+)
+
+
+# A publisher's own recruitment copy. It sits inside a press release feed and
+# reads like prose, so a measured YKK run filed "2027年卒の学生の皆様を対象に
+# ビジネス職の1Dayインターンシップを開催します" as a hard fact about the
+# company — it is the wire's own hiring advert. The URL is the cheap test, but
+# the wire served it under an article path, so the text is checked as well.
+_RECRUITMENT_AD_RE = re.compile(
+    r"(インターンシップ|インターン|新卒採用|中途採用|"
+    r"career\s+opportunit|join\s+our\s+team|we\s+are\s+hiring|apply\s+now|"
+    r"open\s+positions?|job\s+openings?|recruit(?:ing|ment)\s+(?:site|page|event))",
     re.IGNORECASE,
 )
 
@@ -290,10 +397,27 @@ def is_structural_noise(text: str) -> bool:
     if pipe_count >= 4 and len(stripped) < 240 and not _has_sentence(stripped):
         return True
 
+    # A block made mostly of table rows. The per-line forms above only catch a
+    # table that arrives as one row or as a short one; a comparison table page
+    # arrives as thirty pipe rows joined into a single block, and its length
+    # defeated the length test. Measured on YKK: a Japanese brokerage-comparison
+    # page was filed as one hard fact running to thousands of characters.
+    if _is_table_block(stripped):
+        return True
+
     if _MARKETING_RE.search(stripped):
         return True
 
     if _FILING_BOILERPLATE_RE.search(stripped):
+        return True
+
+    if _is_navigation_rail(stripped):
+        return True
+
+    if _PAGE_FOOTER_RE.search(stripped):
+        return True
+
+    if _RECRUITMENT_AD_RE.search(stripped):
         return True
 
     return False
@@ -310,6 +434,40 @@ def _has_sentence(text: str) -> bool:
         word.lower().endswith(("ed", "ing", "s"))
         for word in words
     ) or " is " in text.lower() or " was " in text.lower()
+
+
+# Prose line inside a table block. A table can carry a sentence in one cell, and
+# that sentence is still reporting — what makes the block furniture is that most
+# of its lines are rows.
+_TABLE_PROSE_LINE_CHARS = 200
+
+# Only a page-scale table is furniture. A five-row table with a sentence in it is
+# an article that happens to be tabulated, and rejecting it would delete the
+# statement rather than the formatting.
+_TABLE_BLOCK_MIN_ROWS = 8
+_TABLE_BLOCK_SHORT_ROW_RATIO = 2
+
+
+def _is_table_block(text: str) -> bool:
+    """True when a page-scale block is mostly short table rows.
+
+    Counted per line rather than by separator density so a prose cell survives:
+    that cell is a statement, and dropping it would lose the fact rather than the
+    noise. A comparison page is mostly commodity rows — fees, counts, tick marks —
+    with a handful of descriptive cells, so the short rows dominate.
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 3:
+        return False
+    rows = [line for line in lines if line.startswith("|")]
+    if len(rows) < _TABLE_BLOCK_MIN_ROWS:
+        return False
+    prose = [
+        line
+        for line in rows
+        if len(line) >= _TABLE_PROSE_LINE_CHARS or _has_sentence(line)
+    ]
+    return len(rows) > _TABLE_BLOCK_SHORT_ROW_RATIO * max(1, len(prose))
 
 
 def source_tier(url: str) -> int:

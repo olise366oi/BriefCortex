@@ -21,6 +21,10 @@ ENV_FILES = (
 )
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
+DEFAULT_DATABASE_URL = (
+    "postgresql+psycopg2://postgres:postgres@localhost:5432/briefcortex"
+)
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables and backend/.env."""
@@ -28,7 +32,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "BriefCortex API"
     DEBUG: bool = True
     ALLOWED_ORIGINS: List[str] = ["http://localhost:3000"]
-    DATABASE_URL: str = "postgresql+psycopg2://postgres:postgres@localhost:5432/briefcortex"
+    DATABASE_URL: str = DEFAULT_DATABASE_URL
 
     # Live retrieval is the default. MOCK_DATA must be switched on explicitly,
     # so a missing .env can never quietly serve the bundled sample report.
@@ -68,10 +72,18 @@ class Settings(BaseSettings):
         available" at import time). The committed URL is written bare, so it is
         pointed at the psycopg2 driver here instead of forcing every caller to
         rewrite it. An explicit ``+driver`` is always left alone.
+
+        A blank value falls back to the committed default rather than erasing it.
         """
         if not isinstance(value, str):
             return value
         text = value.strip()
+        if not text:
+            # A bare ``DATABASE_URL=`` in .env.example declares that the key
+            # exists; it does not configure anything. pydantic-settings loaded
+            # that empty string as a value, which silently replaced the default
+            # above and left SQLAlchemy unable to parse a URL at import time.
+            return DEFAULT_DATABASE_URL
         if text.startswith("postgresql://"):
             return "postgresql+psycopg2://" + text[len("postgresql://"):]
         return value

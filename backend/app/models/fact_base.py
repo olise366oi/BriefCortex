@@ -76,6 +76,9 @@ class CoverageRecord(BaseModel):
     lanes_missing: List[str] = []
     notes: List[str] = []
     checks_to_run: List[str] = []
+    # Queries the search API refused, so a truncated run is not read as a
+    # company with nothing to find.
+    search_failures: List[str] = []
 
 
 class FactBase(BaseModel):

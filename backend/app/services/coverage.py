@@ -42,6 +42,9 @@ class EvidenceCoverageReport:
     lanes_missing: List[str] = field(default_factory=list)
     checks_to_run: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+    # Queries the search API refused outright. Kept apart from "no reporting"
+    # because a blocked run says nothing about the company.
+    search_failures: List[str] = field(default_factory=list)
 
     @property
     def level(self) -> str:
@@ -83,12 +86,25 @@ def build_coverage_report(
     preliminary: bool = False,
     window_start=None,
     window_end=None,
+    search_failures: Optional[List[str]] = None,
 ) -> EvidenceCoverageReport:
     """Summarize retrieval coverage and the checks it leaves to the reader."""
     report = EvidenceCoverageReport(
         total_facts=total_facts,
         distinct_sources=distinct_sources,
+        search_failures=list(search_failures or []),
     )
+
+    if report.search_failures:
+        # A refusal is not silence. Saying so keeps a quota-exhausted or
+        # blocked run from being read as "this company has nothing to find",
+        # which is the one conclusion the ledger exists to prevent.
+        report.lanes_missing.append("search")
+        report.notes.append(
+            f"{len(report.search_failures)} search quer(y/ies) were refused by "
+            "the search API, so this brief is thinner than the company's actual "
+            "coverage. Retrieval was cut off; it did not come back empty."
+        )
 
     if preliminary:
         # The meeting is far enough out that its own 30-day window has not
@@ -101,7 +117,7 @@ def build_coverage_report(
             "refreshed closer to the meeting."
         )
 
-    if total_facts == 0:
+    if total_facts == 0 and not report.search_failures:
         report.notes.append(
             "No reporting was found in the window. This is a statement about "
             "coverage, not about the company: nothing here says the company is "

@@ -297,6 +297,9 @@ class CoverageItem(BaseModel):
     lanes_missing: List[str] = Field(default_factory=list)
     notes: List[str] = Field(default_factory=list)
     checks_to_run: List[str] = Field(default_factory=list)
+    # Queries the search API refused. Delivered so the reader can tell a thin
+    # brief from a brief whose retrieval was cut off.
+    search_failures: List[str] = Field(default_factory=list)
 
 
 class EvidenceSummary(BaseModel):

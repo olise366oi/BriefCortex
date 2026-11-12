@@ -65,7 +65,10 @@ from app.services.media_trust import (
     resolve_policy,
 )
 from app.services.logger_service import get_logger
-from app.services.publisher_filter import extract_clean_text
+from app.services.publisher_filter import (
+    extract_clean_text,
+    names_company,
+)
 from app.services.search_planner import SearchPlan, plan_searches, replan_after_empty
 from app.services.tavily_search import extract_bodies, tavily_search
 from app.services.window import compute_evidence_window
@@ -132,10 +135,25 @@ async def _search_query(
     company_name: str,
     aliases: Optional[List[str]] = None,
     dated: bool = True,
+    failures: Optional[List[str]] = None,
 ) -> List[dict]:
-    return await asyncio.to_thread(
-        tavily_search, query, start_date, end_date, company_name, domains, aliases, dated
-    )
+    """Run one query; a failed query returns nothing instead of killing the run.
+
+    One query against one lane is not the brief. Letting its exception escape
+    propagated out of ``asyncio.gather`` and failed the whole request — a
+    measured YKK run died on a single rejected Japanese query while the other
+    three lanes were returning results normally. The failure is recorded so the
+    coverage ledger can say retrieval was cut off rather than empty.
+    """
+    try:
+        return await asyncio.to_thread(
+            tavily_search, query, start_date, end_date, company_name, domains, aliases, dated
+        )
+    except Exception as exc:
+        logger.info("Query dropped | query=%r | %s: %s", query, type(exc).__name__, exc)
+        if failures is not None:
+            failures.append(f"{type(exc).__name__}: {exc}")
+        return []
 
 
 def _usable_count(batch: List[dict]) -> int:
@@ -166,6 +184,7 @@ async def _run_round(
     seen_urls: set,
     aliases: Optional[List[str]] = None,
     dated: bool = True,
+    failures: Optional[List[str]] = None,
 ) -> Tuple[List[dict], int, int]:
     """Run a round of queries concurrently and fold the results in.
 
@@ -174,10 +193,17 @@ async def _run_round(
     Returns (results_kept, usable_with_body, newly_added). The kept results are
     returned as well so independent lanes can be merged by the caller after they
     finish, instead of racing over one shared list.
+
+    ``failures`` collects the queries the search API refused, so a round that
+    came back empty because it was blocked is not later read as a round that
+    found nothing.
     """
     batches = await asyncio.gather(
         *[
-            _search_query(query, domains, start_date, end_date, company_name, aliases, dated)
+            _search_query(
+                query, domains, start_date, end_date, company_name, aliases,
+                dated, failures,
+            )
             for query in queries
         ]
     )
@@ -384,6 +410,7 @@ async def _search_plan(
     local_domains: Optional[List[str]] = None,
     meeting_purpose: str = "",
     national_press: Optional[List[str]] = None,
+    failures: Optional[List[str]] = None,
 ) -> List[dict]:
     """Run the planned queries until two consecutive rounds bring nothing new.
 
@@ -405,6 +432,10 @@ async def _search_plan(
 
     Two budgets also apply: MAX_SEARCH_ROUNDS guards a runaway plan, and
     SEARCH_BUDGET_SECONDS keeps the request inside the client's poll window.
+
+    ``failures`` collects refused queries. A run whose searches were blocked
+    returns fewer articles, and without that being recorded the coverage ledger
+    reports it as a company nobody writes about.
     """
     merged: List[dict] = []
     seen_urls: set = set(known_urls or set())
@@ -415,7 +446,7 @@ async def _search_plan(
     lanes = [
         _run_round(
             plan.queries, plan.domains, start_date, end_date, company_name,
-            [], set(seen_urls), aliases,
+            [], set(seen_urls), aliases, failures=failures,
         )
     ]
     lane_labels = ["news"]
@@ -427,7 +458,7 @@ async def _search_plan(
         lanes.append(
             _run_round(
                 open_queries, [], start_date, end_date, company_name,
-                [], set(seen_urls), aliases, dated=False,
+                [], set(seen_urls), aliases, dated=False, failures=failures,
             )
         )
         lane_labels.append("open")
@@ -440,6 +471,7 @@ async def _search_plan(
             _run_round(
                 linkedin_queries, list(LINKEDIN_JOB_DOMAINS), start_date, end_date,
                 company_name, [], set(seen_urls), aliases, dated=False,
+                failures=failures,
             )
         )
         lane_labels.append("linkedin")
@@ -452,7 +484,7 @@ async def _search_plan(
         lanes.append(
             _run_round(
                 local_queries, list(local_domains), start_date, end_date,
-                company_name, [], set(seen_urls), aliases,
+                company_name, [], set(seen_urls), aliases, failures=failures,
             )
         )
         lane_labels.append("local")
@@ -525,7 +557,7 @@ async def _search_plan(
 
         _kept, usable, added = await _run_round(
             take, plan.domains, start_date, end_date, company_name,
-            merged, seen_urls, aliases,
+            merged, seen_urls, aliases, failures=failures,
         )
         stale_rounds = 0 if added else stale_rounds + 1
 
@@ -581,29 +613,16 @@ def title_names_company(result: dict, company: str, aliases: Optional[List[str]]
     settles the subject when the body is ambiguous. Word boundaries are used so
     "NVIDIA" does not match inside a longer token, and the registry legal name is
     accepted as well, because a headline often uses the formal name.
+
+    An exchange-prefixed ticker does not count as naming the company: the check
+    runs through ``publisher_filter.names_company`` so the headline rule and the
+    result filter agree on what a name is.
     """
     title = " ".join(str(result.get("title") or "").split())
     if not title:
         return False
 
-    names = [company.strip()]
-    for alias in aliases or []:
-        alias_text = (alias or "").strip()
-        if alias_text and alias_text.lower() != company.strip().lower():
-            names.append(alias_text)
-
-    lowered = title.lower()
-    for name in names:
-        clean = name.lower()
-        if not clean:
-            continue
-        if clean.isascii():
-            pattern = rf"(?<![a-z0-9]){re.escape(clean)}(?![a-z0-9])"
-            if re.search(pattern, lowered):
-                return True
-        elif clean in lowered:
-            return True
-    return False
+    return names_company(title, company, aliases)
 
 
 async def _route_and_collect(
@@ -1248,6 +1267,10 @@ async def ingest_company_data(
     trust_policy = await resolve_policy(press_jurisdiction)
     logger.info("Media trust | %s", trust_policy.description)
 
+    # Queries the search API refused. Threaded into the coverage ledger below so
+    # a cut-off run is reported as cut off, not as empty.
+    search_failures: List[str] = []
+
     if window.needs_fetch:
         # The company's registered country decides which national press is
         # searched: a company is covered where it lives, and the international
@@ -1304,6 +1327,7 @@ async def ingest_company_data(
             local_domains=local_domains,
             meeting_purpose=request.meeting_purpose.strip(),
             national_press=list(trust_policy.national),
+            failures=search_failures,
         )
     else:
         # Everything up to today is already covered, so reuse what is stored
@@ -1469,6 +1493,7 @@ async def ingest_company_data(
         preliminary=window.preliminary,
         window_start=window.window_start,
         window_end=window.available_end,
+        search_failures=search_failures,
     )
     logger.info(
         "Coverage | level=%s | facts=%s | sources=%s | missing=%s | checks=%s",
@@ -1497,6 +1522,7 @@ async def ingest_company_data(
             lanes_missing=coverage_report.lanes_missing,
             notes=coverage_report.notes,
             checks_to_run=coverage_report.checks_to_run,
+            search_failures=coverage_report.search_failures,
         ),
     )
 

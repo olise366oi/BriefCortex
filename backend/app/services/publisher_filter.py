@@ -27,6 +27,40 @@ MIN_BODY_CHARS = 400
 
 BODY_HEADING_RE = re.compile(r"^#\s+\S")
 
+# A recruitment section on a publisher's own site. "Canadians will understand
+# this section" — a publisher's recruiting pitch is not press either, and a
+# YKK run still lost nothing, because the news lanes open with a domain list
+# and these pages never rank there.
+RECRUITMENT_PATH_RE = re.compile(
+    r"(/recruit[/\-.]|/careers?[/\-.]|/jobs?[/\-.]|/hiring[/\-.]|"
+    r"/internship|/employment)"
+)
+
+# Pages that are a company's own advert for staff, wherever they live.
+RECRUITMENT_HOST_PATHS = (
+    "/careers",
+    "/jobs",
+    "/recruit",
+    "/hiring",
+    "/work-with-us",
+    "/join-us",
+)
+
+
+def is_recruitment_page(url: str) -> bool:
+    """True when a URL is a hiring page rather than reporting.
+
+    Careers pages are the hiring lane's own source and are read as postings;
+    every other recruitment page is a publisher's advert for staff, which is
+    not evidence about the company being briefed.
+    """
+    if is_careers_url(url):
+        return False
+    path = url_path(url)
+    if RECRUITMENT_PATH_RE.search(path):
+        return True
+    return any(path.startswith(prefix) for prefix in RECRUITMENT_HOST_PATHS)
+
 
 def _longest_domain_match(host: str, rules: dict):
     """Return the rule whose domain is the longest suffix of host."""
@@ -115,12 +149,51 @@ def mentions_company(
         str(result.get(key) or "") for key in ("title", "url", "raw_content")
     ).lower()
 
-    candidates = [name]
+    return names_company(haystack, company_name, aliases)
+
+
+# An exchange-prefixed ticker is not the company's name. "Boreo Oyj (FRA:YKK)
+# Q3 2026 Earnings Call Transcript" names Boreo: YKK there is Boreo's Frankfurt
+# symbol, and a three-letter code belongs to unrelated businesses on different
+# venues — the same collision `services/ticker.py` refuses to price. Measured on
+# a YKK run: the whole of Boreo's earnings transcript was filed as YKK's news,
+# because ":" is not a letter and the word-boundary check accepted the symbol.
+EXCHANGE_TICKER_RE = re.compile(
+    r"(?<![a-z0-9])[a-z]{2,6}\s*[:\uff1a]\s*[a-z]{1,6}(?![a-z0-9])"
+)
+
+
+def _name_candidates(
+    company_name: str,
+    aliases: Optional[List[str]] = None,
+) -> List[str]:
+    """Every lowercased name the company is known by, blanks and repeats dropped."""
+    name = company_name.strip().lower()
+    candidates = [name] if name else []
     for alias in aliases or []:
         alias_text = (alias or "").strip().lower()
-        # A one-word alias is fine; an empty or identical one adds nothing.
-        if alias_text and alias_text != name:
+        if alias_text and alias_text not in candidates:
             candidates.append(alias_text)
+    return candidates
+
+
+def names_company(
+    text: str,
+    company_name: str,
+    aliases: Optional[List[str]] = None,
+) -> bool:
+    """True when ``text`` names the company rather than quoting its ticker.
+
+    Shared by the result filter and the headline rule so "this is the company"
+    means one thing in this codebase. An exchange-prefixed ticker is removed
+    before matching: the symbol identifies a listing, and the same symbol on
+    another venue belongs to someone else.
+    """
+    candidates = _name_candidates(company_name, aliases)
+    if not candidates:
+        return True
+
+    haystack = EXCHANGE_TICKER_RE.sub(" ", (text or "").lower())
 
     for candidate in candidates:
         if candidate.isascii():
@@ -153,6 +226,7 @@ def filter_results_for_company(
     kept: List[dict] = []
     refused: List[str] = []
     roundups = 0
+    recruitment = 0
     for result in results:
         if not isinstance(result, dict):
             continue
@@ -184,6 +258,13 @@ def filter_results_for_company(
         if not is_kept_result(url):
             continue
 
+        # A publisher's own recruitment page is not reporting about the company
+        # it was returned for. Measured on YKK: a wire's Japanese internship
+        # advert was filed as a hard fact, because the page reads like prose.
+        if is_recruitment_page(url):
+            recruitment += 1
+            continue
+
         if not mentions_company(result, company_name, aliases):
             continue
 
@@ -199,6 +280,8 @@ def filter_results_for_company(
         logger.info(
             "Multi-company roundup columns skipped | count=%s", roundups
         )
+    if recruitment:
+        logger.info("Recruitment pages skipped | count=%s", recruitment)
 
     return kept
 

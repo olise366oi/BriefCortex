@@ -4,8 +4,15 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from tenacity import retry, stop_after_attempt, wait_random_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_random_exponential
 from tavily import TavilyClient
+from tavily.errors import (
+    BadRequestError,
+    ForbiddenError,
+    InvalidAPIKeyError,
+    MissingAPIKeyError,
+    UsageLimitExceededError,
+)
 
 from app.core.config import get_settings
 from app.services.logger_service import get_logger
@@ -19,13 +26,43 @@ logger = get_logger("tavily")
 TAVILY_MAX_RESULTS = 20
 
 
+def _is_transient(exc: BaseException) -> bool:
+    """Only failures that can succeed on another attempt are worth retrying.
+
+    A rejected key, a refused request or an exhausted plan quota answers the
+    same way every time. Retrying it three times with backoff spends the
+    request's whole time budget on a question that was already answered, and
+    across a four-lane plan that is minutes spent learning nothing.
+    """
+    return not isinstance(
+        exc,
+        (
+            UsageLimitExceededError,
+            ForbiddenError,
+            InvalidAPIKeyError,
+            MissingAPIKeyError,
+            BadRequestError,
+        ),
+    )
+
+
 class TavilySearchError(Exception):
     """Raised when Tavily search fails after retries."""
+
+
+class TavilyQuotaError(TavilySearchError):
+    """The search plan will refuse every further query in this run.
+
+    Called out separately from a generic failure because the difference
+    matters to the reader: a quota-exhausted run has *no* coverage, which is a
+    statement about the run and not about the company.
+    """
 
 
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_random_exponential(multiplier=1, max=10),
+    retry=retry_if_exception(_is_transient),
     reraise=True,
 )
 def tavily_search(
@@ -86,6 +123,10 @@ def tavily_search(
         logger.info("Filter kept %s of %s results", len(kept), len(results))
         return kept
 
+    except UsageLimitExceededError as exc:
+        raise TavilyQuotaError(
+            f"Tavily search quota exhausted (query={query!r}): {exc}"
+        ) from exc
     except Exception as exc:
         logger.exception(
             "Tavily search failed | query=%r | window=%s..%s",

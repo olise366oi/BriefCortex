@@ -53,105 +53,50 @@ thresholds, per-platform link shapes — see **[ENGINEERING.md](ENGINEERING.md)*
 
 End-to-end data flow. Four cache decisions sit on this path, retrieval is four
 concurrent lanes rather than one query, and generation is three stages with the
-audit between them.
+audit between them. Per-module detail is in the module map below and in
+**[ENGINEERING.md](ENGINEERING.md)**.
 
 ```mermaid
-graph TD
-    %% ---------- Entry ----------
-    UI[Frontend UI] -->|company + meeting time + objective| API[FastAPI]
-    API --> Record[(briefings row, status=pending)]
+flowchart TD
+    UI[Frontend] --> API[FastAPI: 202 + poll]
+    API --> L1{{L1 request cache<br/>company + objective + meeting day}}
+    L1 -- hit --> Serve[Brief delivered]
+    L1 -- miss --> R[Retrieval plan]
 
-    %% ---------- Cache layer 1: same request? ----------
-    API --> L1{"L1 request cache<br/>company + objective + meeting day"}
-    L1 -- hit, and facts on file<br/>do not contradict it --> Serve[Return stored brief]
-    L1 -- miss, or contradicted --> Window
-
-    %% ---------- Window: what period is missing? ----------
-    Record --> Window["Meeting-anchored window<br/>30 days ending at the meeting<br/>minus coverage watermark"]
-    Window -- "nothing to fetch" --> Reuse[(Reuse stored evidence)]
-    Window -- "fetch the increment" --> Lanes
-
-    %% ---------- Retrieval: four lanes, concurrently ----------
-    subgraph RETRIEVE["Retrieval — asyncio.gather"]
-        Lanes["Lane 1: registry news<br/>dated, publisher-scoped"]
-        Lanes2["Lane 2: open domain<br/>regulator, careers,<br/>counterparty. Undated"]
-        Lanes3["Lane 3: LinkedIn jobs<br/>undated"]
-        Lanes4["Lane 4: local language<br/>national press only"]
-        Lanes --> Tavily[Tavily API]
-        Lanes2 --> Tavily
-        Lanes3 --> Tavily
-        Lanes4 --> Tavily
-        Tavily -- "network error" --> Retry["Tenacity: retry"]
-        Retry --> Tavily
+    subgraph RET["four lanes, asyncio.gather"]
+        direction LR
+        N["news<br/>dated · publisher-scoped"]
+        O["open domain<br/>regulator · careers"]
+        J["LinkedIn jobs"]
+        Loc["local language<br/>national press only"]
     end
 
-    %% ---------- Cleaning ----------
-    Tavily --> Refuse{"Host refused?<br/>forum, job board,<br/>wildlife, law-firm ad"}
-    Refuse -- yes --> Drop[Discard]
-    Refuse -- no --> Scope["Per-publisher scoping<br/>body boundaries, trafilatura"]
-    Scope --> Gate["Quality gate:<br/>table rows, vendor copy,<br/>filing boilerplate"]
-    Gate --> Dated["Publish date, URL-slug<br/>and page fallback"]
-    Dated --> Window2["Window filter<br/>+ reporting-period check"]
-    Window2 --> Order["Trust order:<br/>primary > national > global > fallback"]
-    Order --> Route["Route by subject:<br/>whose article is this?"]
+    R --> N & O & J & Loc
+    RET --> Clean["Scope + quality gate<br/>window filter · trust order · subject routing"]
+    Clean --> FB[(FactBase<br/>facts · opinions · hiring · conflicts)]
 
-    %% ---------- Fact base ----------
-    Route --> FactBase[(FactBase<br/>hard_facts · analyst_opinions · hiring<br/>quote · conflicts · incidental_facts<br/>forward_looking · coverage · id)]
-    Reuse --> FactBase
+    FB --> L2{{L2 evidence fingerprint}}
+    L2 -- miss --> Gen
+    L2 -- hit --> L3{{L3 contradiction check}}
+    L3 -- stands --> Serve
+    L3 -- contradicted --> Gen
 
-    %% ---------- Cache layer 2: same brief? ----------
-    FactBase --> L2{"L2 evidence fingerprint<br/>facts + postings + objective<br/>+ description + own profile"}
-    L2 -- hit --> Invalidate{"L3 cross-set check:<br/>do newer facts<br/>overturn it?"}
-    Invalidate -- reusable --> Serve
-    Invalidate -- contradicted --> Stages
-    L2 -- miss --> Stages
-
-    %% ---------- Inference: three stages, audit between ----------
-    subgraph INFER["Generation"]
-        Stages["1 · findings<br/>read evidence, write news + hires"]
-        Audit["audit<br/>unsupported claim removed"]
-        Analysis["2 · analysis<br/>read audited findings + quote<br/>+ our own market position"]
-        Recommend["3 · recommendation<br/>read assessment + our profile"]
-        Stages --> Audit
-        Audit --> Analysis
-        Analysis --> Recommend
+    subgraph Gen["Generation — audit between"]
+        direction TB
+        F[1 findings] --> A[audit] --> An[2 analysis] --> Rec[3 recommendation]
     end
 
-    %% ---------- Gateway ----------
-    Recommend --> Headers["Cache headers:<br/>x-bf-cache-key, x-bf-cache-ttl,<br/>x-bf-content-class"]
-    Analysis --> Headers
-    Stages --> Headers
-    Headers --> Bifrost{"Bifrost gateway<br/>semantic_cache, dimension 1"}
-    Bifrost -- "cache hit" --> Replay[Replay response]
-    Bifrost -- "miss" --> LLM["OpenAI-compatible model"]
-    LLM -->|JSON| Validate{"Pydantic stage schema"}
-    Validate -- failure --> Feedback["Feed the error back, retry"]
-    Feedback --> LLM
-    Validate -- success --> Save[(BriefingReport + evidence<br/>+ fingerprint, JSONB)]
-
-    Save --> API
-    Save --> L1
-
-    %% ---------- Housekeeping ----------
-    Sched["Daily retention loop"] --> Retention["Evidence expiry,<br/>URL decay"]
-
-    classDef edgeNode fill:#1f2937,stroke:#111827,stroke-width:2px,color:#ffffff
-    classDef cacheNode fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
-    classDef layerNode fill:#f3f4f6,stroke:#9ca3af,stroke-width:1px,color:#111827
-    classDef storeNode fill:#ecfdf5,stroke:#10b981,stroke-width:2px,color:#065f46
-    classDef dropNode fill:#fee2e2,stroke:#dc2626,stroke-width:1px,color:#7f1d1d
-
-    class API,UI edgeNode
-    class L1,L2,Invalidate,Bifrost,Headers cacheNode
-    class Window,Lanes,Lanes2,Lanes3,Lanes4,Tavily,Retry,Scope,Gate,Dated,Window2,Order,Route,Stages,Audit,Analysis,Recommend,Replay,Feedback,LLM,Validate,Refuse,Sched,Retention layerNode
-    class Record,Reuse,FactBase,Save storeNode
-    class Drop dropNode
+    Gen --> GW{{L4 Bifrost gateway<br/>cache key + graded TTL}}
+    GW -- hit --> Replay[Replayed stage call] --> Save
+    GW -- miss --> LLM[Model]
+    LLM --> Schema{Pydantic schema}
+    Schema -- invalid --> LLM
+    Schema -- valid --> Save[(Report + evidence<br/>+ fingerprint)]
+    Save --> Serve
 ```
 
-Read left to right: the request either stops at a cache decision or walks the
-retrieval path once for the days it has not yet covered. Nothing about the
-evidence is re-fetched that is already stored, and no claim reaches the
-recommendation without passing the audit.
+Nothing about the evidence is re-fetched that is already stored, and no claim
+reaches the recommendation without passing the audit.
 
 *(The diagram is the canonical one; the module map and design decisions below carry the detail.)*
 
@@ -162,6 +107,12 @@ Two clocks are enforced over a 30-day window: the article's **publication date**
 and its **reporting period** (an article published today can still describe Q3
 2025 — those sentences are dropped, while comparisons like "lowest since April
 2025" are kept because they describe where things stand now).
+
+The reporting-period check reads a date however it is written, because a measured
+YKK run kept a 2013 docket in a 30-day window: `26 Aug 2013`, `Aug. 2013` and
+`7/30/2020` were all invisible to a pattern that only knew full month names.
+A court filing's caption — `Defendants.`, `No.`, `564.`, a comma run of corporate
+names — is dropped as document numbering rather than a statement.
 
 A 2023 layoff cannot be used as a 2026 negotiation lever.
 
@@ -270,6 +221,14 @@ only 40 were Canada Goose, the rest Callaway Golf, Acushnet and Cole Haan. Linke
 names the employer in `disambiguatingDescription` and puts the *city* in
 `description`, so a role is kept only when its employer matches the company being
 briefed.
+
+**A symbol is not a name.** `Boreo Oyj (FRA:YKK) Q3 2026 Earnings Call Transcript`
+names Boreo — "YKK" there is Boreo's Frankfurt symbol, not YKK the company. A
+measured YKK run filed nine of the brief's thirty-seven hard facts from that
+transcript: Boreo's revenue, EBIT and cash flow, attributed to a Japanese zipper
+maker. The name check strips exchange-prefixed tickers (`FRA:YKK`, `NASDAQ:ACME`)
+before matching, because a three-letter code belongs to unrelated businesses on
+different venues — the same collision the price resolver below already refuses.
 
 **A price needs a ticker, and a ticker needs an identity.** The quote is fetched
 from a symbol resolved from the company name (`services/ticker.py`), so a listed
