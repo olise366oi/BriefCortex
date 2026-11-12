@@ -1,4 +1,4 @@
-# CLAUDE.md — AI Editor Guide for BriefCortex
+﻿# CLAUDE.md — AI Editor Guide for BriefCortex
 
 > This file helps AI coding assistants understand this codebase and work on it effectively.
 
@@ -66,7 +66,7 @@ npm run dev
 
 # Tests (keep the local Postgres up: repository cases open a real session)
 cd backend
-python -m pytest -q            # 672 tests
+python -m pytest -q            # 674 tests
 ```
 
 ## Where to Add Features

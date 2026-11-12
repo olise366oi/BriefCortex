@@ -117,7 +117,18 @@ MIN_POSTING_LINE_CHARS = 20
 # Bodies are extracted in worker threads. The work is CPU-bound (markdown ->
 # trafilatura -> plain-text rebuild), so running it inline blocks the event loop
 # and serialises the reading stage; too many threads at once only adds contention.
-EXTRACT_CONCURRENCY = 8
+EXTRACT_CONCURRENCY = 12
+
+# A rich opening round already is the coverage; follow-up rounds add a marginal
+# tail and hold the brief for it. Measured: YETI's three follow-ups cost 37s and
+# added one URL; Crocs' cost 36s and added twenty to an opening of 149. The tail
+# is capped by opening size, and a round adding fewer than LOW_YIELD_NEW_URLS
+# stops it early. Coverage is bounded by the query list, not by these rounds.
+RICH_OPENING_USABLE = 40
+VERY_RICH_OPENING_USABLE = 80
+MAX_FOLLOWUP_ROUNDS_RICH = 2
+MAX_FOLLOWUP_ROUNDS_VERY_RICH = 1
+LOW_YIELD_NEW_URLS = 2
 
 # Cap roles per source so one aggregator page cannot fill the hiring block.
 MAX_POSTINGS_PER_SOURCE = 10
@@ -563,18 +574,31 @@ async def _search_plan(
         deadline=started_at + SEARCH_BUDGET_SECONDS,
     )
 
+    # A rich opening round already is the coverage. Cap the follow-up tail by
+    # how rich it was, and stop early when a round buys almost nothing.
+    opening_usable = usable
+    if opening_usable >= VERY_RICH_OPENING_USABLE:
+        max_follow_ups = MAX_FOLLOWUP_ROUNDS_VERY_RICH
+    elif opening_usable >= RICH_OPENING_USABLE:
+        max_follow_ups = MAX_FOLLOWUP_ROUNDS_RICH
+    else:
+        max_follow_ups = MAX_SEARCH_ROUNDS - 1
+
     round_index = 1
     stale_rounds = 0 if added else 1
     pending = list(plan.fallback_queries)
+    follow_ups = 0
 
     while (
         round_index < MAX_SEARCH_ROUNDS
+        and follow_ups < max_follow_ups
         and usable >= MIN_USABLE_PER_ROUND
         and pending
         and stale_rounds < MAX_STALE_ROUNDS
         and time.monotonic() - started_at < SEARCH_BUDGET_SECONDS
     ):
         round_index += 1
+        follow_ups += 1
         take = pending[:MAX_EXTRA_QUERIES]
         pending = pending[MAX_EXTRA_QUERIES:]
 
@@ -591,10 +615,18 @@ async def _search_plan(
             time.monotonic() - started_at,
         )
 
+        if opening_usable >= RICH_OPENING_USABLE and added < LOW_YIELD_NEW_URLS:
+            logger.info(
+                "Follow-up tail stopped | opening_usable=%s | round_added=%s "
+                "| elapsed=%.1fs",
+                opening_usable, added, time.monotonic() - started_at,
+            )
+            break
+
     logger.info(
         "Search plan executed | rounds=%s | merged=%s | pending_queries=%s "
-        "| stale_streak=%s | elapsed=%.1fs",
-        round_index, len(merged), len(pending), stale_rounds,
+        "| stale_streak=%s | opening_usable=%s | elapsed=%.1fs",
+        round_index, len(merged), len(pending), stale_rounds, opening_usable,
         time.monotonic() - started_at,
     )
     return merged

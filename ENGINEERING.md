@@ -1,4 +1,4 @@
-# ENGINEERING.md — how BriefCortex actually works
+﻿# ENGINEERING.md — how BriefCortex actually works
 
 This is the detailed companion to `README.md`. The README describes what the
 product is and how to run it; this document describes how it is built, what each
@@ -86,7 +86,7 @@ returns, not the round cap.
 | Bound | Constant | Value |
 |---|---|---|
 | Opening round | — | one concurrent round per lane |
-| Follow-up rounds | `MAX_SEARCH_ROUNDS`, `MAX_EXTRA_QUERIES` | 8 rounds, 6 queries each |
+| Follow-up rounds | `MAX_SEARCH_ROUNDS`, `MAX_EXTRA_QUERIES` | 8 rounds, 6 queries each; capped by opening size: ≥80 usable → 1, ≥40 → 2 |
 | Wall clock | `SEARCH_BUDGET_SECONDS` | 45s |
 | Diminishing returns | `MAX_STALE_ROUNDS` | 2 consecutive rounds with no new URL |
 | Per query | `TAVILY_MAX_RESULTS` | 20, then the publisher filter |
@@ -106,6 +106,12 @@ two articles in 33 seconds. The plan ran dry (`pending_queries=0`) before either
 the round cap or the budget was reached. **The constraint on coverage is the
 supplied query list, not these constants** — which is why the planner is asked
 for objective-specific queries and why the counterparty lane was added.
+
+The tail is also capped directly: an opening round with ≥80 usable results gets
+one follow-up, ≥40 gets two (`RICH_OPENING_USABLE`, `VERY_RICH_OPENING_USABLE`),
+and any round that adds fewer than `LOW_YIELD_NEW_URLS` ends the loop. Measured:
+YETI's three follow-ups cost 37s for one URL; Toro's opening 117 took one
+follow-up and finished the search in 31s instead of 50–52s.
 
 ### 3.2c Replanning once when the opening round comes back thin
 
@@ -562,7 +568,7 @@ which needs libpq and fails at import on a machine that has only psycopg2.
 
 ## 11. Testing
 
-`backend/tests/`, 672 tests, plus `bifrost-cache-policy/tests/`, 74 collected (68
+`backend/tests/`, 674 tests, plus `bifrost-cache-policy/tests/`, 74 collected (68
 pass, 6 live cases skipped unless `BIFROST_URL` is set). What they are for:
 
 - **Live-run regressions, not invented cases.** Every hiring-filter test uses a

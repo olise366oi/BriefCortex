@@ -1,4 +1,4 @@
-# BriefCortex
+﻿# BriefCortex
 
 **Time-sliced competitive intelligence for high-stakes commercial meetings.**
 
@@ -269,7 +269,7 @@ able to tell "the search converged" from "the search was cut off".
 | Bound | Value | What it protects against |
 |---|---|---|
 | Opening round | one per lane, **concurrent** (news, open, LinkedIn, local) | a single query list deciding coverage |
-| Follow-up rounds | `MAX_SEARCH_ROUNDS = 8`, `MAX_EXTRA_QUERIES = 6` per round | a runaway query plan |
+| Follow-up rounds | `MAX_SEARCH_ROUNDS = 8`, `MAX_EXTRA_QUERIES = 6` per round, capped when the opening round is rich (≥80 usable → 1 follow-up; ≥40 → 2) | a runaway query plan, and a marginal tail holding the brief |
 | Wall clock | `SEARCH_BUDGET_SECONDS = 45` | outliving the client's patience |
 | Diminishing returns | `MAX_STALE_ROUNDS = 2` — two consecutive rounds adding no new URL | paying Tavily for the same results again |
 | Per query | `TAVILY_MAX_RESULTS = 20`, then the publisher filter | an unfiltered result set |
@@ -293,8 +293,15 @@ changes cut that to 229 seconds on the same company:
   markdown → trafilatura → plain-text rebuild is CPU-bound and running it inline
   blocked the event loop for the whole reading stage.
 
-What is left is latency, not slack: the search round (50s), the reading stage
-(60s), and one model call per dedup/audit batch at 7–15 seconds each.
+What is left is latency, not slack: the search round, the reading stage, and one
+model call per dedup/audit batch at 7–15 seconds each.
+
+**A rich opening round ends the tail.** The opening lanes already produce the
+coverage; the follow-ups mostly buy reorderings. Measured: YETI's three follow-ups
+cost 37s and added one URL; Crocs' cost 36s and added twenty to an opening of 149.
+The tail is now capped by opening size and stops after a round adding fewer than
+`LOW_YIELD_NEW_URLS`. Toro: opening 117 usable, one follow-up adding 2, search
+finished in 31s where it used to take 50–52s.
 
 The loop exits on whichever bound is reached first, and it is the **diminishing-returns
 bound that actually fires**. Measured on a real four-lane run (28 planned queries):
@@ -694,7 +701,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 672 passed.
+Expected: 674 passed.
 
 The gateway policy package ships its own suite, runnable without this backend:
 
