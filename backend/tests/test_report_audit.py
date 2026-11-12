@@ -15,11 +15,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from app.models.briefing import BriefingReport, Claim, ClaimModule
-from app.models.fact_base import FactBase, FactItem, IncidentalFact
+from app.models.briefing import BriefingReport
+from app.models.fact_base import FactBase, FactItem
 from app.services.report_audit import (
     SECTION_NAMES,
-    AuditOutcome,
     _apply,
     _flatten,
     audit_report,

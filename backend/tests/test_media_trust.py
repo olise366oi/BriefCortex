@@ -9,7 +9,6 @@ depend on the model: refusal, validation, storage, and the tiers.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 

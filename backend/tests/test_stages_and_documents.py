@@ -11,9 +11,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-import pytest
-
-from app.models.briefing import BriefingReport
 from app.models.fact_base import FactBase, FactItem
 from app.services.evidence_fingerprint import evidence_fingerprint
 from app.services.long_document import (

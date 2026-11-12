@@ -1,8 +1,6 @@
 """Tests for the coverage ledger: what retrieval reached and what it did not."""
 from __future__ import annotations
 
-import pytest
-
 from app.models.fact_base import CoverageRecord
 from app.services.coverage import (
     COVERAGE_NONE,

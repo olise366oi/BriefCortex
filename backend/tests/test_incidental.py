@@ -1,7 +1,6 @@
 """Tests for incidental facts: extraction, isolation, and classification plumbing."""
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
 
 from app.models.fact_base import FactBase, FactItem, IncidentalFact

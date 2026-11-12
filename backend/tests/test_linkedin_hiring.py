@@ -18,8 +18,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from app.services.job_postings import (
     _item_list_employer,
     _item_list_location,
