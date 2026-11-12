@@ -103,3 +103,7 @@ class FactBase(BaseModel):
     forward_looking: List[FactItem] = []
     # What retrieval did and did not reach, plus the checks left to the reader.
     coverage: CoverageRecord = CoverageRecord()
+    # Other names the briefed company is known by, when the registry resolved a
+    # legal entity. The audit uses them so a claim naming the legal name is not
+    # rejected as being about a different company.
+    company_aliases: List[str] = []

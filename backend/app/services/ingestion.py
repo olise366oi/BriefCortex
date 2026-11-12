@@ -1610,6 +1610,7 @@ async def ingest_company_data(
         conflicts=[],
         incidental_facts=incidental,
         forward_looking=forward_looking,
+        company_aliases=list(aliases or []),
         coverage=CoverageRecord(
             level=coverage_report.level,
             total_facts=coverage_report.total_facts,

@@ -1,4 +1,4 @@
-# /backend/app/services/company_identity.py
+﻿# /backend/app/services/company_identity.py
 """Identify a company's jurisdiction and domicile before searching for it.
 
 Tavily has no notion of where a company is registered, so a brief on an Indian
@@ -83,7 +83,7 @@ class IdentityCandidate:
 
 
 # How many candidates to surface. Beyond this the list stops being a choice.
-MAX_CANDIDATES_RETURNED = 5
+MAX_CANDIDATES_RETURNED = 10
 
 # Two candidates this close cannot be separated by score alone, so the caller
 # is asked to choose rather than accepting whichever sorted first.
@@ -278,34 +278,63 @@ def _fetch_candidates(company_name: str) -> List[dict]:
     return payload.get("data", []) if isinstance(payload, dict) else []
 
 
+def _candidate_from_item(item: dict, name: str) -> Optional[IdentityCandidate]:
+    entity = item.get("attributes", {}).get("entity", {})
+    legal_name = (entity.get("legalName") or {}).get("name") or ""
+    if not legal_name:
+        return None
+
+    score = _name_similarity(legal_name, name)
+    status = entity.get("status")
+    # An inactive shell must never outrank an active entity of the same name.
+    if (status or "").upper() != "ACTIVE":
+        score -= 0.25
+
+    return IdentityCandidate(
+        name=legal_name,
+        jurisdiction=entity.get("jurisdiction"),
+        legal_form=(entity.get("legalForm") or {}).get("id"),
+        status=status,
+        confidence=round(max(score, 0.0), 3),
+    )
+
+
+def _rank(items: List[dict], name: str) -> List[IdentityCandidate]:
+    ranked = [c for c in (_candidate_from_item(item, name) for item in items) if c]
+    ranked.sort(key=lambda candidate: candidate.confidence, reverse=True)
+    return ranked
+
+
 def rank_candidates(company_name: str) -> List[IdentityCandidate]:
-    """Return the registered entities matching this name, best first."""
+    """Return the registered entities matching this name, best first.
+
+    The registry filter matches the words it is given, so a legal name that
+    carries an extra word ("THE TORO COMPANY" for the caller's "Toro") may not
+    appear in the first page at all: measured, "Toro" returned three French
+    shells and a shipping company, and the model was then asked to choose among
+    entities that did not include the company the caller meant. When the name is
+    ambiguous, the common legal-name variants are queried too and merged before
+    the model is asked, so the choice includes the real candidate.
+    """
     name = company_name.strip()
     if not name:
         return []
 
-    ranked: List[IdentityCandidate] = []
-    for item in _fetch_candidates(name):
-        entity = item.get("attributes", {}).get("entity", {})
-        legal_name = (entity.get("legalName") or {}).get("name") or ""
-        if not legal_name:
-            continue
+    ranked = _rank(_fetch_candidates(name), name)
+    if ranked and not needs_caller_choice(name, ranked):
+        return ranked[:MAX_CANDIDATES_RETURNED]
 
-        score = _name_similarity(legal_name, name)
-        status = entity.get("status")
-        # An inactive shell must never outrank an active entity of the same name.
-        if (status or "").upper() != "ACTIVE":
-            score -= 0.25
-
-        ranked.append(
-            IdentityCandidate(
-                name=legal_name,
-                jurisdiction=entity.get("jurisdiction"),
-                legal_form=(entity.get("legalForm") or {}).get("id"),
-                status=status,
-                confidence=round(max(score, 0.0), 3),
-            )
-        )
+    seen = {(candidate.name, candidate.jurisdiction) for candidate in ranked}
+    for variant in (f"{name} Company", f"{name} Inc"):
+        for item in _fetch_candidates(variant):
+            candidate = _candidate_from_item(item, name)
+            if candidate is None:
+                continue
+            key = (candidate.name, candidate.jurisdiction)
+            if key in seen:
+                continue
+            seen.add(key)
+            ranked.append(candidate)
 
     ranked.sort(key=lambda candidate: candidate.confidence, reverse=True)
     return ranked[:MAX_CANDIDATES_RETURNED]

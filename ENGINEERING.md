@@ -205,6 +205,21 @@ Two levers, both needed:
   using known other meanings (`AMD Instinct`, `Instinct EMR`, `Deep Instinct`)
   plus description overlap, with plural/verb stemming so "text" matches "texts".
 
+**Candidate discovery comes first.** The registry filter matches the words it is
+given, so a legal name with an extra word can be absent from the result page
+entirely: measured, "Toro" returned three French shells, a Dutch entity and a
+shipping company — not The Toro Company. The model was then asked to choose
+among entities that did not include the caller's company, and the brief was
+built (and audited) about the wrong one. `rank_candidates` now also queries
+`"<name> Company"` and `"<name> Inc"` when the base name is ambiguous, merges the
+results, and only then asks the model. Toro resolved to The Toro Company (US-DE)
+and its claims passed the audit 10/10 instead of being rejected 9/9.
+
+The audit is told those names too: `FactBase.company_aliases` carries the
+registry legal name, and the audit context lists it under `ALSO KNOWN AS` with
+the instruction that the briefed company is the requested name, never whatever
+entity appears most often in the evidence digest.
+
 ### 3.6 Hiring
 
 `services/hiring.py`, `services/job_postings.py`.
@@ -568,7 +583,7 @@ which needs libpq and fails at import on a machine that has only psycopg2.
 
 ## 11. Testing
 
-`backend/tests/`, 674 tests, plus `bifrost-cache-policy/tests/`, 74 collected (68
+`backend/tests/`, 677 tests, plus `bifrost-cache-policy/tests/`, 74 collected (68
 pass, 6 live cases skipped unless `BIFROST_URL` is set). What they are for:
 
 - **Live-run regressions, not invented cases.** Every hiring-filter test uses a

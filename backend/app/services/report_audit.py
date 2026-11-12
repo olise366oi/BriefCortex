@@ -45,6 +45,11 @@ Judge each claim on two questions:
    different company is rejected even when that company is named alongside ours,
    and even when its URL was in the retrieved evidence. A partnership story about
    a counterparty is about the counterparty, not about us.
+   The company being briefed is the one named after COMPANY BEING BRIEFED plus
+   any name listed under ALSO KNOWN AS. A claim naming one of those is about the
+   briefed company unless it clearly concerns a different named entity. Never
+   infer a different briefed company from the evidence: the subject is the one
+   named in the request, not whatever entity appears most often in the digest.
 2. SUPPORT: does the evidence sentence actually state what the claim states?
    Extra numbers, dates, terms or consequences that the evidence does not carry
    are a failure, not an enrichment.
@@ -208,6 +213,7 @@ async def _audit_claims(
     fact_base: FactBase,
     *,
     extra_headers: Optional[Dict[str, str]] = None,
+    aliases: Sequence[str] = (),
 ) -> Dict[int, Dict[str, str]]:
     """Ask the model which claims do not hold. Returns {flat_index: verdict}."""
     if not claims:
@@ -224,6 +230,9 @@ async def _audit_claims(
         for position, (section, _index, claim) in enumerate(claims[:MAX_AUDIT_CLAIMS])
     )
     context = f"COMPANY BEING BRIEFED: {company}"
+    other_names = [name for name in aliases if name and name != company]
+    if other_names:
+        context += f"\nALSO KNOWN AS: {', '.join(other_names)}"
     described = " ".join((description or "").split())
     if described:
         context += f"\nWHAT THE CALLER SAID ABOUT IT: {described}"
@@ -276,6 +285,7 @@ async def audit_report(
     description: str = "",
     *,
     cache_headers: Optional[Dict[str, str]] = None,
+    aliases: Sequence[str] = (),
 ) -> tuple[BriefingReport, AuditOutcome]:
     """Return the brief with unverified claims removed, plus what was removed.
 
@@ -340,6 +350,7 @@ async def audit_report(
         _evidence_text(fact_base),
         fact_base,
         extra_headers=cache_headers,
+        aliases=aliases,
     )
     model_failures.update({k: v for k, v in unfunded.items() if k not in model_failures})
     model_failures.update({k: v for k, v in invented.items() if k not in model_failures})

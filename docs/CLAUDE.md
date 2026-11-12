@@ -66,7 +66,7 @@ npm run dev
 
 # Tests (keep the local Postgres up: repository cases open a real session)
 cd backend
-python -m pytest -q            # 674 tests
+python -m pytest -q            # 677 tests
 ```
 
 ## Where to Add Features

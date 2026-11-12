@@ -141,3 +141,60 @@ def test_possible_facts_carry_their_url_and_subject():
 
     assert report.possible_facts[0].source_url.host == "x"
     assert report.possible_facts[0].article_subject == "Other Co"
+
+
+def test_the_audit_is_told_the_names_the_company_is_known_by(monkeypatch):
+    """A common name needs its legal name in the audit context, not just the
+    caller's short form: measured, the model inferred a different entity and
+    rejected every claim about The Toro Company."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.services import report_audit
+
+    seen: list[str] = []
+
+    class _Completions:
+        async def create(self, **kwargs):
+            seen.append(kwargs["messages"][1]["content"])
+
+            class _Msg:
+                content = '{"verdicts": []}'
+
+            class _Choice:
+                message = _Msg()
+
+            class _Resp:
+                choices = [_Choice()]
+
+            return _Resp()
+
+    class _Chat:
+        completions = _Completions()
+
+    class _Client:
+        chat = _Chat()
+
+    monkeypatch.setattr(
+        report_audit, "build_client", lambda: (_Client(), "fake-model")
+    )
+    base = FactBase(
+        company_id="toro",
+        last_refresh_date=datetime.now(timezone.utc),
+        hard_facts=[FactItem(content="Toro upgraded.", source_url="https://x/1")],
+        analyst_opinions=[],
+    )
+    claim = SimpleNamespace(claim="Toro upgraded.", source_url="https://x/1")
+
+    asyncio.run(
+        report_audit._audit_claims(
+            [("news", 0, claim)],
+            "Toro",
+            "",
+            "evidence",
+            base,
+            aliases=["THE TORO COMPANY"],
+        )
+    )
+
+    assert "ALSO KNOWN AS: THE TORO COMPANY" in seen[0]

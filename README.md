@@ -1,4 +1,4 @@
-﻿# BriefCortex
+# BriefCortex
 
 **Time-sliced competitive intelligence for high-stakes commercial meetings.**
 
@@ -579,7 +579,7 @@ BriefCortex/
 | `services/briefing_service.py` | Async job accept, cache lookup, status orchestration, stale-job recovery |
 | `services/ingestion.py` | Retrieval orchestration; parallel lanes, fact assembly, window filtering |
 | `services/search_planner.py` | Model-driven search plan, constrained to a source registry |
-| `services/company_identity.py` | Registry lookup for jurisdiction and legal form (GLEIF) |
+| `services/company_identity.py` | Registry lookup for jurisdiction and legal form (GLEIF); ambiguous names also query legal-name variants before the model chooses |
 | `services/entity_search.py` | Turns the caller's description into confirmable company candidates |
 | `services/entity_disambiguation.py` | Rejects possible facts that belong to a different same-named company |
 | `services/counterparty.py` | Reads the objective for the other company and adds queries about its own condition |
@@ -701,7 +701,7 @@ python -m alembic upgrade head
 python -m pytest tests/ -v
 ```
 
-Expected: 674 passed.
+Expected: 677 passed.
 
 The gateway policy package ships its own suite, runnable without this backend:
 
