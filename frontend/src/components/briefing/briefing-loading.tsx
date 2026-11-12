@@ -1,6 +1,14 @@
-export function BriefingLoading() {
+export function BriefingLoading({ notice }: { notice?: string | null }) {
   return (
     <div className="flex flex-col gap-4">
+      {notice ? (
+        <p
+          role="status"
+          className="clay-surface-butter p-3 text-sm text-ink/80"
+        >
+          {notice}
+        </p>
+      ) : null}
       <div className="clay-surface-grape p-4 flex flex-col gap-2.5 clay-pulse">
         <div className="h-4 w-1/3 rounded-lg bg-grape/30" />
         <div className="h-3 w-full rounded-md bg-grape/20" />

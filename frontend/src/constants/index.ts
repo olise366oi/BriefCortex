@@ -1,1 +1,5 @@
-export { POLL_INTERVAL_MS, POLL_TIMEOUT_MS } from "./briefing";
+export {
+  POLL_INTERVAL_MS,
+  POLL_MAX_TRANSPORT_FAILURES,
+  POLL_SLOW_NOTICE_MS,
+} from "./briefing";

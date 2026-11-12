@@ -3,7 +3,11 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import { createBriefing, getBriefing, listBriefings } from "@/api";
-import { POLL_INTERVAL_MS, POLL_TIMEOUT_MS } from "@/constants";
+import {
+  POLL_INTERVAL_MS,
+  POLL_MAX_TRANSPORT_FAILURES,
+  POLL_SLOW_NOTICE_MS,
+} from "@/constants";
 import {
   isoToDatetimeLocalValue,
   toDatetimeLocalValue,
@@ -66,9 +70,14 @@ export function useBriefing() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [briefings, setBriefings] = useState<BriefingListItem[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  // Non-blocking status line for a run that is simply long; not an error.
+  const [notice, setNotice] = useState<string | null>(null);
 
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef(false);
+  // Consecutive transport failures. A restart or a proxy hiccup should not
+  // discard a brief the backend is still writing.
+  const failuresRef = useRef(0);
 
   const clearPoll = useCallback(() => {
     if (pollTimerRef.current) {
@@ -105,10 +114,12 @@ export function useBriefing() {
         const next = await getBriefing(briefingId);
         if (abortRef.current) return;
 
+        failuresRef.current = 0;
         setStatus(next);
         setActiveId(next.id);
 
         if (next.status === "completed" && next.report) {
+          setNotice(null);
           setUiState("ready");
           clearPoll();
           void refreshBriefings();
@@ -116,6 +127,7 @@ export function useBriefing() {
         }
 
         if (next.status === "failed") {
+          setNotice(null);
           setUiState("error");
           setErrorMessage(next.error || "Couldn't generate the brief.");
           clearPoll();
@@ -123,11 +135,13 @@ export function useBriefing() {
           return;
         }
 
-        if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
-          setUiState("error");
-          setErrorMessage("Brief generation timed out. Try again.");
-          clearPoll();
-          return;
+        // No wall-clock deadline: the backend keeps working and the brief is
+        // saved when it finishes. Long runs get a notice, not an error.
+        if (Date.now() - startedAt > POLL_SLOW_NOTICE_MS) {
+          setNotice(
+            "Still working — a large evidence set can take several minutes. " +
+              "The brief is saved when it finishes; you can also reopen it from the list."
+          );
         }
 
         pollTimerRef.current = setTimeout(() => {
@@ -135,9 +149,19 @@ export function useBriefing() {
         }, POLL_INTERVAL_MS);
       } catch {
         if (abortRef.current) return;
-        setUiState("error");
-        setErrorMessage("Couldn't generate the brief.");
-        clearPoll();
+
+        failuresRef.current += 1;
+        if (failuresRef.current > POLL_MAX_TRANSPORT_FAILURES) {
+          setUiState("error");
+          setErrorMessage("Lost contact with the backend while the brief was running.");
+          clearPoll();
+          return;
+        }
+
+        // Retry rather than giving up: the job may still be completing.
+        pollTimerRef.current = setTimeout(() => {
+          void pollStatus(briefingId, startedAt);
+        }, POLL_INTERVAL_MS);
       }
     },
     [clearPoll, refreshBriefings]
@@ -156,6 +180,8 @@ export function useBriefing() {
     });
     setErrors({});
     setErrorMessage(null);
+    setNotice(null);
+    failuresRef.current = 0;
     setUiState("empty");
   }, [clearPoll]);
 
@@ -166,6 +192,8 @@ export function useBriefing() {
       setActiveId(briefingId);
       setErrors({});
       setErrorMessage(null);
+      setNotice(null);
+      failuresRef.current = 0;
       setUiState("loading");
 
       try {
@@ -224,6 +252,8 @@ export function useBriefing() {
     clearPoll();
     setUiState("loading");
     setErrorMessage(null);
+    setNotice(null);
+    failuresRef.current = 0;
     setStatus(null);
     setActiveId(null);
 
@@ -269,6 +299,7 @@ export function useBriefing() {
     uiState,
     status,
     errorMessage,
+    notice,
     briefings,
     activeId,
     isLoading: uiState === "loading",

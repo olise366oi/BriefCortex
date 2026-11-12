@@ -270,7 +270,7 @@ able to tell "the search converged" from "the search was cut off".
 |---|---|---|
 | Opening round | one per lane, **concurrent** (news, open, LinkedIn, local) | a single query list deciding coverage |
 | Follow-up rounds | `MAX_SEARCH_ROUNDS = 8`, `MAX_EXTRA_QUERIES = 6` per round | a runaway query plan |
-| Wall clock | `SEARCH_BUDGET_SECONDS = 45` | outliving the client's poll window |
+| Wall clock | `SEARCH_BUDGET_SECONDS = 45` | outliving the client's patience |
 | Diminishing returns | `MAX_STALE_ROUNDS = 2` — two consecutive rounds adding no new URL | paying Tavily for the same results again |
 | Per query | `TAVILY_MAX_RESULTS = 20`, then the publisher filter | an unfiltered result set |
 
@@ -278,7 +278,7 @@ able to tell "the search converged" from "the search was cut off".
 pipeline does after retrieval — publish-date recovery, subject routing, the
 own-careers probe, the incidental harvest and its corroboration, semantic
 deduplication — used to run one stage after another, so a 172-fact run spent 523
-seconds inside ingestion alone against a 180-second client poll window. Two
+seconds inside ingestion alone, longer than any client was willing to wait. Two
 changes cut that to 229 seconds on the same company:
 
 - **Semantic dedup went from 335s to 37s.** The merge walked one fact at a time
@@ -619,7 +619,7 @@ BriefCortex/
 
 ## Design Decisions
 
-1. **Async accept + poll** — generation takes seconds; `202` + polling keeps the UI responsive without websockets. Jobs are held in a task set so the event loop cannot collect them mid-run, and a job stuck in `processing` is failed on next startup.
+1. **Async accept + poll** — generation takes seconds to minutes; `202` + polling keeps the UI responsive without websockets. Jobs are held in a task set so the event loop cannot collect them mid-run, and a job stuck in `processing` is failed on next startup. The client has **no wall-clock deadline**: it polls while the job is `pending`/`processing`, shows a notice after five minutes, and retries transient transport failures instead of discarding a running brief.
 2. **Subject routing, not name matching** — an article that merely names the company is not about the company. Each article is routed by its subject before any fact is trusted, which is what stopped a competitor's reporting being filed as ours.
 3. **Hiring is its own lane** — a posting states intent, not outcome, so it informs the model without being asserted as a reported fact. The decision is made per line and per structured posting, never per page: a markets column mentioning "jobs data" and a careers page's apply buttons are both furniture. Postings are found by reading schema.org `JobPosting` blocks, because a careers board renders its listings in JavaScript and its index page usually carries none (measured: 0 on Lever, Greenhouse, SmartRecruiters and iCIMS indexes). Detail pages do carry them, so the board index is crawled for per-platform link shapes — Lever `/{org}/{uuid}`, SmartRecruiters `/{org}/{digits}-{slug}`, iCIMS `/jobs/{digits}`, slug boards `/jobs/{dept}/{city}/{role-slug}` — and a few detail pages are opened. Hiring queries run **undated**: a posting has no publish date, so restricting them to the evidence window excluded almost every real posting (measured: 1 careers URL with the window versus 9 without).
 4. **One fact, every source** — the same fact from five outlets is stored once with all five links. Coverage count is not the claim's value.
@@ -669,7 +669,7 @@ Open [http://localhost:3000](http://localhost:3000) — the app redirects to `/b
 
 - `POST /api/briefings` — accepts `{ company_name, meeting_time, meeting_purpose }`, returns `202` with `{ id, status }`
 - `GET /api/briefings` — list saved briefings (newest first)
-- `GET /api/briefings/{id}` — fetch/poll a briefing by id until `status` is `completed` or `failed`
+- `GET /api/briefings/{id}` — fetch/poll a briefing by id until `status` is `completed` or `failed`. Polling has no client deadline; a long run keeps the same request and shows a notice, and transient failures are retried.
 
 ---
 

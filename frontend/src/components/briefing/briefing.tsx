@@ -16,6 +16,7 @@ export function Briefing() {
     uiState,
     status,
     errorMessage,
+    notice,
     briefings,
     activeId,
     isLoading,
@@ -54,7 +55,7 @@ export function Briefing() {
 
           <section className="col-span-12 lg:col-span-8 flex flex-col gap-6">
             {uiState === "empty" ? <BriefingEmpty /> : null}
-            {uiState === "loading" ? <BriefingLoading /> : null}
+            {uiState === "loading" ? <BriefingLoading notice={notice} /> : null}
             {uiState === "error" ? (
               <BriefingError message={errorMessage} onRetry={retry} />
             ) : null}

@@ -31,7 +31,13 @@ class Settings(BaseSettings):
 
     APP_NAME: str = "BriefCortex API"
     DEBUG: bool = True
-    ALLOWED_ORIGINS: List[str] = ["http://localhost:3000"]
+    # Next.js picks 3001 when 3000 is taken; both hosts are the same dev machine.
+    ALLOWED_ORIGINS: List[str] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ]
     DATABASE_URL: str = DEFAULT_DATABASE_URL
 
     # Live retrieval is the default. MOCK_DATA must be switched on explicitly,

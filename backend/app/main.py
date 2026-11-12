@@ -85,9 +85,20 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title=settings.APP_NAME, debug=settings.DEBUG, lifespan=lifespan)
 
+# Debug builds run the Next dev server, which picks 3001 when 3000 is taken, and
+# a browser can reach it as either localhost or 127.0.0.1. Those two variants are
+# added only in debug; a real deployment keeps exactly the configured list.
+_origins = list(settings.ALLOWED_ORIGINS)
+if settings.DEBUG:
+    for _host in ("localhost", "127.0.0.1"):
+        for _port in (3000, 3001):
+            _origin = f"http://{_host}:{_port}"
+            if _origin not in _origins:
+                _origins.append(_origin)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.ALLOWED_ORIGINS,
+    allow_origins=_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

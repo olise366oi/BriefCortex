@@ -19,6 +19,7 @@ POST /api/briefings
        ├─ pre-delivery audit                services/report_audit.py
        └─ status=completed, report JSONB    repositories/briefing_repository.py
 GET /api/briefings/{id}                      polled by the UI every 1.5s
+                                             (no client deadline; slow-run notice)
 ```
 
 A job stuck in `processing` past `STALE_JOB_MINUTES` is failed on next startup,

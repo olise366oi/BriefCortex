@@ -86,7 +86,8 @@ python -m pytest -q            # 672 tests
 
 1. UI posts `BriefingRequest` to `POST /api/briefings`
 2. Backend returns `202` + `{ id }`
-3. Hook polls `GET /api/briefings/{id}` every 1.5s
+3. Hook polls `GET /api/briefings/{id}` every 1.5s with **no client deadline**;
+   slow runs show a notice, and transient transport failures are retried
 4. Side panel loads history via `GET /api/briefings`
 5. Clone copies form fields locally — no API call until submit
 
@@ -113,6 +114,8 @@ python -m pytest -q            # 672 tests
 - Gateway runs are opt-in per process: set `GATEWAY_BASE_URL` (e.g.
   `http://localhost:8080/v1`) and `GATEWAY_MODEL` (`deepseek/deepseek-flash`); the
   stage calls then carry `x-bf-cache-key` and replay on an unchanged evidence set.
+- `DEBUG=true` also accepts the Next dev origins on `127.0.0.1` and ports 3000/3001,
+  so a frontend that fell back to another port is not silently CORS-blocked.
 
 ## What NOT to Do
 
