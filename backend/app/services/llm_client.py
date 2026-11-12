@@ -27,6 +27,7 @@ from openai import (
 from pydantic import ValidationError
 
 from app.core.config import get_settings
+from app.services import token_usage
 from app.services.logger_service import get_logger
 
 logger = get_logger("llm")
@@ -94,7 +95,18 @@ class _LimitedCompletions:
 
     async def create(self, *args: Any, **kwargs: Any) -> Any:
         async with llm_slot():
-            return await self._inner.create(*args, **kwargs)
+            response = await self._inner.create(*args, **kwargs)
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+            completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+            token_usage.record(prompt_tokens, completion_tokens)
+            logger.debug(
+                "LLM usage | prompt_tokens=%s | completion_tokens=%s",
+                prompt_tokens,
+                completion_tokens,
+            )
+        return response
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)

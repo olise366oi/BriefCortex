@@ -36,6 +36,7 @@ from app.services.own_profile import ProfileStore, resolve_profile
 from app.services.own_company_scan import scan_own_company
 from app.services.ingestion import _build_company_id, ingest_company_data
 from app.services.logger_service import get_logger
+from app.services.token_usage import usage_run
 from app.services.window import compute_evidence_window
 
 logger = get_logger("briefing_service")
@@ -289,6 +290,12 @@ async def _generate_live_report(
     )
     briefing_repo = BriefingRepository(db)
     reused = briefing_repo.find_by_fingerprint(record.company_name, fingerprint)
+    if reused is None:
+        logger.info(
+            "Evidence-set cache miss | company=%r | fingerprint=%s | generation runs",
+            record.company_name,
+            fingerprint,
+        )
     if reused is not None:
         # Same facts, but they may contradict what the stored brief assumed. A
         # brief written while the company was hiring is wrong the moment a
@@ -446,7 +453,19 @@ async def _process_job(briefing_id: uuid.UUID, settings: Settings) -> None:
             report = _load_mock_report(record.company_name)
             evidence = None
         else:
-            report, evidence = await _generate_live_report(record, db)
+            with usage_run() as totals:
+                try:
+                    report, evidence = await _generate_live_report(record, db)
+                finally:
+                    logger.info(
+                        "Briefing token usage | id=%s | calls=%s | prompt_tokens=%s "
+                        "| completion_tokens=%s | total_tokens=%s",
+                        briefing_id,
+                        totals["calls"],
+                        totals["prompt_tokens"],
+                        totals["completion_tokens"],
+                        totals["prompt_tokens"] + totals["completion_tokens"],
+                    )
 
         repo.update(
             briefing_id,
@@ -572,6 +591,16 @@ async def create_briefing(db: Session, request: BriefingRequest) -> uuid.UUID:
             cached.id,
             company,
             verdict.reason,
+        )
+    else:
+        # A miss is expected; naming the reason makes the hit rate explainable
+        # instead of a number to guess about.
+        logger.info(
+            "Request cache miss | company=%r | purpose=%r | meeting_time=%s | reason=%s",
+            company,
+            purpose,
+            request.meeting_time.isoformat(),
+            "expired" if cached is not None else "no record",
         )
 
     record = repo.create(
