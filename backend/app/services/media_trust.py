@@ -30,16 +30,12 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from app.services.logger_service import get_logger
+from app.services.media_list_store import MediaListStore
 
 logger = get_logger("media_trust")
-
-# Where learned per-country lists are kept. Machine-local, not source: the list
-# is generated per deployment and is not part of the product's identity.
-STORE_PATH = Path(__file__).resolve().parents[2] / "data" / "media_trust.json"
 
 # =============================================================================
 # 1. Never press, anywhere
@@ -359,50 +355,6 @@ class MediaPolicy:
             f"titles ({self.source}, {self.confidence} confidence) rank above "
             f"international wires"
         )
-
-
-class MediaListStore:
-    """Country -> learned press list, persisted as JSON on disk."""
-
-    def __init__(self, path: Path = STORE_PATH) -> None:
-        self.path = path
-        self._data: Dict[str, dict] = {}
-        self._loaded = False
-
-    def _load(self) -> None:
-        if self._loaded:
-            return
-        self._loaded = True
-        try:
-            if self.path.exists():
-                payload = json.loads(self.path.read_text(encoding="utf-8"))
-                if isinstance(payload, dict):
-                    self._data = payload
-        except Exception as exc:
-            logger.warning("Media list store unreadable | path=%s | %s", self.path, exc)
-            self._data = {}
-
-    def get(self, jurisdiction: str) -> Optional[dict]:
-        self._load()
-        return self._data.get((jurisdiction or "").upper())
-
-    def put(self, jurisdiction: str, entry: dict) -> None:
-        self._load()
-        self._data[(jurisdiction or "").upper()] = entry
-        self._save()
-
-    def _save(self) -> None:
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(
-                json.dumps(self._data, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-        except Exception as exc:
-            logger.warning("Media list store unwritable | path=%s | %s", self.path, exc)
-
-    def jurisdictions(self) -> List[str]:
-        self._load()
-        return sorted(self._data.keys())
 
 
 _STORE = MediaListStore()

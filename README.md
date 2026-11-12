@@ -484,7 +484,7 @@ BriefCortex/
 │   ├── migrations/           # Alembic revisions
 │   └── tests/
 ├── docs/                     # CLAUDE, KARPATHY
-├── .github/workflows/        # CI: backend + gateway-policy suites
+├── .github/workflows/        # CI: backend, frontend and gateway-policy suites
 ├── bifrost-cache-policy/     # Standalone gateway cache rules (pip-installable)
 └── docker-compose.yml        # Postgres, Bifrost gateway, Redis Stack
 ```
@@ -509,6 +509,7 @@ BriefCortex/
 | `services/publisher_filter.py` | URL scoping, article-body location, text extraction, plain-text recovery |
 | `services/long_document.py` | Segments a filing, scores blocks against the objective, keeps the sections that answer it |
 | `services/media_trust.py` | Country → press list and language, refused hosts, national-press trust ordering |
+| `services/media_list_store.py` | The on-disk store those learned press lists are persisted in |
 | `services/fact_extraction.py` | Inverted-pyramid split, dedup, source ordering |
 | `services/coverage.py` | Coverage ledger: levels, missing lanes, manual checks, search failures |
 | `services/freshness.py` | Publication dates, date fallback, reporting-period checks |
@@ -719,6 +720,26 @@ python -m alembic upgrade head        # bring a database up to date
 python -m alembic revision --autogenerate -m "describe the change"
 python -m alembic check               # fail if models and migrations disagree
 ```
+
+---
+
+## Deployment Safety
+
+This is an **authless demo**. Three consequences follow, and none of them is
+hidden behind configuration:
+
+- **No authentication.** Every endpoint is open to anyone who can reach it, and a
+  stored briefing is readable by anyone holding its UUID
+  (`GET /api/briefings/{id}`).
+- **Loopback by default.** `uvicorn app.main:app` binds `127.0.0.1`; keep it that
+  way. Before exposing the service beyond the local machine, put it behind a
+  reverse proxy that authenticates and rate-limits, and serve it over TLS.
+- **The debug console is a development tool.** `/api/debug` is mounted only when
+  `DEBUG=true`; it exposes whole pipeline internals and bypasses the job queue, so
+  a deployment other people can reach must run with `DEBUG=false`.
+
+Provider keys belong in `backend/.env` (gitignored) or machine-level environment
+variables — never in `backend/.env.example`.
 
 ---
 
