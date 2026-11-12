@@ -30,6 +30,14 @@ def _log_startup_configuration() -> None:
         settings.ENABLE_LOGS,
     )
 
+    if not settings.DEBUG:
+        # The demo ships no authentication. Saying so at startup is cheaper than
+        # discovering it after the service has been exposed.
+        logger.warning(
+            "No authentication is enforced by this application. Keep it behind an "
+            "authenticating reverse proxy and never expose it to an untrusted network."
+        )
+
     if settings.MOCK_DATA:
         logger.warning(
             "MOCK_DATA is ON: every briefing returns the bundled sample report "
