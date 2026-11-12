@@ -391,6 +391,10 @@ async def resolve_publish_dates(results: List[dict]) -> List[dict]:
         recovered = date_from_body(str(result.get("raw_content") or ""))
         if recovered is None:
             async with semaphore:
+                # Re-check after the queue: a result that waited for a slot can
+                # start its request after the budget has already run out.
+                if time.monotonic() - started_at > DATE_RECOVERY_BUDGET_SECONDS:
+                    return
                 recovered = await asyncio.to_thread(date_from_url, url)
         if recovered is not None:
             result["published_date"] = recovered.isoformat()

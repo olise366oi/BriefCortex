@@ -225,3 +225,17 @@ def test_an_empty_pair_list_never_calls_the_model(monkeypatch):
     ))
 
     assert asyncio.run(dedup.confirm_same_facts(["a"], ["b"], [])) == []
+
+
+def test_global_candidates_agree_with_the_public_similarity():
+    """The candidate pass normalizes once; scores must not drift from ``similarity``."""
+    facts = [SHORT, FULLER, THIRD, "A regulator fined an unrelated bank in Germany."]
+
+    pairs = dedup.find_candidates_global(facts)
+
+    assert pairs
+    for pair in pairs:
+        expected = dedup.similarity(
+            facts[pair.existing_index], facts[pair.incoming_index]
+        )
+        assert pair.similarity == pytest.approx(expected)

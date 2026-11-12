@@ -3,9 +3,8 @@ from __future__ import annotations
 import re
 from typing import List, Optional
 
-from app.services.hiring import is_careers_url
 from app.services.keywords import match_word
-from app.services.urls import host_of, url_path
+from app.services.urls import host_of
 from app.services.source_rules import (
     HARD_FACT_HEAD_PARAGRAPHS,
     MIN_PARAGRAPH_LENGTH,

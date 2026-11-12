@@ -27,9 +27,12 @@ logger = get_logger("dedup")
 # pair is a candidate but still not a conclusion.
 CANDIDATE_SIMILARITY = 0.6
 
-# How many candidate pairs to submit at once. Pair count grows quadratically, so
-# the list is capped and the strongest candidates win.
+# Cap for the two-list pass (incidental mentions against the fact base), where
+# one side is new and the other is already stored: pair count grows with the
+# product of the two lengths.
 MAX_CANDIDATES = 20
+
+# Pairs per confirmation request.
 BATCH_SIZE = 12
 
 # Confirmation batches run concurrently. Each batch is an independent model call,
@@ -73,20 +76,8 @@ def normalize(text: str) -> str:
 MIN_COVERAGE_CHARS = 40
 
 
-def coverage(shorter: str, longer: str) -> float:
-    """Return how much of the shorter sentence appears inside the longer one.
-
-    ``SequenceMatcher.ratio`` compares both directions, so a short sentence and
-    the same sentence with an added clause score low even though one is plainly
-    a telling of the other (measured: 0.559 for a base sentence versus its own
-    extended version). Coverage asks the question the dedup step actually cares
-    about: is this the same sentence, told with more detail?
-
-    Very short sentences are excluded, because one shared word would otherwise
-    read as high coverage.
-    """
-    a = normalize(shorter)
-    b = normalize(longer)
+def _coverage_normalized(a: str, b: str) -> float:
+    """Coverage for two strings that are already ``normalize``d."""
     if not a or not b:
         return 0.0
     if a == b:
@@ -104,6 +95,30 @@ def coverage(shorter: str, longer: str) -> float:
     return matched / len(a)
 
 
+def _similarity_normalized(a: str, b: str) -> float:
+    """Similarity for two strings that are already ``normalize``d."""
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    return max(SequenceMatcher(None, a, b).ratio(), _coverage_normalized(a, b))
+
+
+def coverage(shorter: str, longer: str) -> float:
+    """Return how much of the shorter sentence appears inside the longer one.
+
+    ``SequenceMatcher.ratio`` compares both directions, so a short sentence and
+    the same sentence with an added clause score low even though one is plainly
+    a telling of the other (measured: 0.559 for a base sentence versus its own
+    extended version). Coverage asks the question the dedup step actually cares
+    about: is this the same sentence, told with more detail?
+
+    Very short sentences are excluded, because one shared word would otherwise
+    read as high coverage.
+    """
+    return _coverage_normalized(normalize(shorter), normalize(longer))
+
+
 def similarity(left: str, right: str) -> float:
     """Return a 0..1 measure of whether these two sentences tell the same thing.
 
@@ -111,13 +126,7 @@ def similarity(left: str, right: str) -> float:
     distance catches paraphrases of the same length, and coverage catches a
     fuller telling of the same sentence.
     """
-    a = normalize(left)
-    b = normalize(right)
-    if not a or not b:
-        return 0.0
-    if a == b:
-        return 1.0
-    return max(SequenceMatcher(None, a, b).ratio(), coverage(left, right))
+    return _similarity_normalized(normalize(left), normalize(right))
 
 
 @dataclass(frozen=True)
@@ -148,9 +157,11 @@ def find_candidates(
 ) -> List[CandidatePair]:
     """Return candidate pairs above the similarity threshold, strongest first."""
     pairs: List[CandidatePair] = []
-    for incoming_index, text in enumerate(incoming):
-        for existing_index, known in enumerate(existing):
-            score = similarity(known, text)
+    normalized_incoming = [normalize(text) for text in incoming]
+    normalized_existing = [normalize(text) for text in existing]
+    for incoming_index, text in enumerate(normalized_incoming):
+        for existing_index, known in enumerate(normalized_existing):
+            score = _similarity_normalized(known, text)
             if score >= threshold:
                 pairs.append(
                     CandidatePair(
@@ -184,9 +195,13 @@ def find_candidates_global(
     the model needs to see twice.
     """
     scored: List[CandidatePair] = []
+    # Normalize once per fact: the pairwise loop is quadratic, and normalizing
+    # inside it re-ran the regexes on every partner (every fact was normalized
+    # n-1 times).
+    normalized = [normalize(text) for text in facts]
     for left in range(len(facts)):
         for right in range(left + 1, len(facts)):
-            score = similarity(facts[left], facts[right])
+            score = _similarity_normalized(normalized[left], normalized[right])
             if score >= threshold:
                 scored.append(
                     CandidatePair(
@@ -294,7 +309,10 @@ async def merge_duplicate_facts(
         return list(facts), stats
 
     texts = [item.content for item in facts]
-    pairs = find_candidates_global(texts)
+    # The candidate pass is O(n²) SequenceMatcher work: run it off the event
+    # loop, otherwise the CPU bound blocks every other stage of the ingestion
+    # (the same reason body extraction moved to a worker pool).
+    pairs = await asyncio.to_thread(find_candidates_global, texts)
     confirmed = await confirm_same_facts(texts, texts, pairs) if pairs else []
     if not pairs:
         logger.info(

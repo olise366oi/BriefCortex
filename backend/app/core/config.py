@@ -12,8 +12,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # same .env whether it is started from the repo root or from backend/.
 #
 # A real .env wins; .env.example is the fallback. The example file is committed
-# and already carries the shared development credentials, so the app runs from a
-# clean checkout without anyone copying it first. Machine-level environment
+# and carries the schema — key names with empty values, never credentials — so a
+# clean checkout runs without anyone copying it first. Machine-level environment
 # variables still override both, because pydantic-settings reads them last.
 ENV_FILES = (
     Path(__file__).resolve().parents[2] / ".env.example",
