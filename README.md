@@ -473,6 +473,15 @@ Three properties keep the bill down, and each is a deliberate trade-off:
   completion tokens: a five-token JSON verdict cost 99 completion tokens with
   reasoning on and 5 with it off. Dedup confirmation and subject routing opt out
   (`reasoning_effort: "none"`); the three generation stages keep it.
+- **The candidate screen is cheap; the model is not.** Pairing every fact with
+  every other was ~25s of CPU on 337 facts before a model call was even made. A
+  word-overlap screen runs first and leaves the edit-distance scoring for pairs
+  whose wording actually overlaps; measured on Crocs, dedup fell from 52s to 7s
+  on the next comparable run.
+- **Generation calls set an explicit output budget.** Without one the findings
+  reply was cut mid-JSON at ~900 tokens (EOF at column 3502, twice), so the
+  stage retried and the run paid three times. Findings now gets 8,192 tokens and
+  the smaller stages 1,024–4,096; the same run succeeds on the first attempt.
 - **The provider's prompt cache is visible.** The usage line carries
   `cached_prompt_tokens`, so a run that reuses a repeated system prompt shows
   what the provider served from its own cache.
@@ -483,7 +492,11 @@ superseded telling is one claim, not two), stored postings are reloaded as
 evidence, and the invalidation check only considers facts added since the stored
 brief. Comparing a set with itself once "overturned" ten unchanged facts.
 Measured on Blue Star after those fixes: a later meeting day with unchanged
-evidence served the stored brief in **7.3s with zero model calls**.
+evidence served the stored brief in **7.3s with zero model calls**. A fresh run
+after the dedup screen and the output budgets fell from **242s / 84.7k tokens
+(Crocs) to 150s / 44.8k tokens (YETI Holdings)**; the dedup stage alone went from
+52s to 7s, and generation from 71s to 40s. Different companies and evidence
+sizes, so read those as direction rather than a controlled A/B.
 
 All four generation calls — findings, audit, analysis and recommendation — carry
 the same gateway headers, so an identical re-run replays each of them. Measured on

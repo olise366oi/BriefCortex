@@ -142,6 +142,7 @@ async def classify_article_subjects(
                     ],
                     response_format={"type": "json_object"},
                     temperature=0.0,
+                    max_tokens=1024,
                     **no_reasoning(),
                 )
                 content = response.choices[0].message.content or ""

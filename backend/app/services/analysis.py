@@ -74,6 +74,7 @@ async def _call_stage_with_retry(
     *,
     stage: str,
     extra_headers: dict | None = None,
+    max_tokens: int = 4096,
 ):
     """Call one stage and validate its shape, feeding failures back on retry.
 
@@ -86,6 +87,11 @@ async def _call_stage_with_retry(
     for every request but only ever attached on the dead single-stage path, so a
     deployment behind Bifrost never cached anything: the gateway saw no
     `x-bf-cache-key` and bypassed its cache by design.
+
+    ``max_tokens`` must be explicit. Without it the provider's default output
+    budget is small enough that the findings reply was cut mid-JSON (measured:
+    EOF at column 3502, twice, costing two retries); reasoning tokens count
+    toward the same budget, so generation stages get a generous ceiling.
     """
     messages = [
         {"role": "system", "content": system_prompt},
@@ -100,6 +106,7 @@ async def _call_stage_with_retry(
                 messages=messages,
                 response_format={"type": "json_object"},
                 temperature=0.2,
+                max_tokens=max_tokens,
                 extra_headers=extra_headers or {},
             )
             content = response.choices[0].message.content or ""
@@ -210,7 +217,7 @@ async def generate_briefing_report(
     )
     findings = await _call_stage_with_retry(
         client, model, FINDINGS_PROMPT, findings_input, FindingsStage, max_retries,
-        stage="findings", extra_headers=gateway_headers,
+        stage="findings", extra_headers=gateway_headers, max_tokens=8192,
     )
 
     report = BriefingReport(
@@ -262,7 +269,7 @@ async def generate_briefing_report(
     )
     analysis_out = await _call_stage_with_retry(
         client, model, ANALYSIS_PROMPT, analysis_input, AnalysisStage, max_retries,
-        stage="analysis", extra_headers=gateway_headers,
+        stage="analysis", extra_headers=gateway_headers, max_tokens=4096,
     )
     audited = audited.model_copy(update={"analysis": analysis_out.analysis})
 
@@ -277,7 +284,7 @@ async def generate_briefing_report(
     summary_out = await _call_stage_with_retry(
         client, model, RECOMMENDATION_PROMPT, recommendation_input,
         RecommendationStage, max_retries, stage="recommendation",
-        extra_headers=gateway_headers,
+        extra_headers=gateway_headers, max_tokens=4096,
     )
     audited = audited.model_copy(update={"executive_summary": summary_out.executive_summary})
 

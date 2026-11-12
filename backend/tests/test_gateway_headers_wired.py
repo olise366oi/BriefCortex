@@ -44,10 +44,12 @@ def _reply_for(prompt: str) -> str:
 def test_the_headers_reach_the_provider_call(monkeypatch):
     """Every stage call must carry the cache key the gateway requires."""
     seen: list[dict] = []
+    budgets: list[int | None] = []
 
     class _Completions:
         async def create(self, **kwargs):
             seen.append(dict(kwargs.get("extra_headers") or {}))
+            budgets.append(kwargs.get("max_tokens"))
 
             system = kwargs["messages"][0]["content"]
             payload = _reply_for(system)
@@ -86,6 +88,9 @@ def test_the_headers_reach_the_provider_call(monkeypatch):
         assert headers.get("x-bf-cache-key"), headers
         assert headers.get("x-bf-cache-ttl") == "24h", headers
         assert headers.get("x-bf-content-class") == "volatile", headers
+    # Without an explicit budget the findings reply is cut mid-JSON and retried.
+    assert budgets, "no budget was sent"
+    assert all(budget and budget >= 4096 for budget in budgets), budgets
 
 
 def test_the_stage_caller_accepts_extra_headers():

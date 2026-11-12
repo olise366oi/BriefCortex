@@ -68,6 +68,7 @@ async def classify_sentences(sentences: List[str], context: str) -> List[str]:
             ],
             response_format={"type": "json_object"},
             temperature=0.0,
+            max_tokens=1024,
             **no_reasoning(),
         )
         content = response.choices[0].message.content or ""

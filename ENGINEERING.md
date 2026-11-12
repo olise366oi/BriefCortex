@@ -350,6 +350,14 @@ transitive chain (A=B, B=C) collapses even when A and C were never compared. The
 fuller telling wins, and the model's failure keeps every fact: a duplicate is
 recoverable, a deleted distinct fact is not.
 
+Before any of that, a **word-overlap screen** drops pairs whose wording barely
+overlaps: comparing 337 facts pairwise is ~56k pairs and ~25s of CPU, and most of
+those pairs are only similar because they share function words. Pairs that pass
+the screen are the only ones scored with the edit distance (measured: ~2s instead
+of 25s, and ~110 model-confirmed candidates instead of 266). A duplicate whose
+wording is almost entirely different is therefore missed — which leaves a
+duplicate in the brief, never a removed fact.
+
 `services/forward_looking.py` removes stated intent from the evidence before the
 model reasons: a promise is not an event. It fires on intent grammar ("will",
 "expects to", "targets") **and** a horizon or goal noun ("by 2028", "market
@@ -537,9 +545,12 @@ Mechanical calls pass `no_reasoning()` (`reasoning_effort: "none"`). deepseek-fl
 reasons by default and bills that as completion: measured, a five-token JSON
 verdict cost 99 completion tokens with reasoning and 5 without. Dedup
 confirmation and subject routing opt out; the three generation stages keep it.
-The collector also records the provider's `prompt_cache_hit_tokens` as
-`cached_prompt_tokens`, so a repeated system prompt shows what the provider
-served from its own cache.
+Every call also sets `max_tokens` explicitly: findings 8,192, analysis and
+recommendation 4,096, audit 2,048, mechanical stages 1,024. Without a budget the
+provider default cut the findings JSON mid-object (~900 tokens, twice), and the
+stage spent two retries on the same truncation. The collector also records the
+provider's `prompt_cache_hit_tokens` as `cached_prompt_tokens`, so a repeated
+system prompt shows what the provider served from its own cache.
 
 ## 10. Configuration
 

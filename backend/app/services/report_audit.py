@@ -244,6 +244,7 @@ async def _audit_claims(
             ],
             response_format={"type": "json_object"},
             temperature=0.0,
+            max_tokens=2048,
             extra_headers=extra_headers or {},
         )
         content = response.choices[0].message.content or ""

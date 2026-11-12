@@ -34,11 +34,23 @@ MAX_CANDIDATES = 20
 
 # Pairs per confirmation request. Larger batches repeat the system prompt fewer
 # times; a malformed reply costs one batch, so the size stays bounded.
-BATCH_SIZE = 20
+BATCH_SIZE = 32
+
+# Confirmations run concurrently; the process-wide LLM cap still applies.
+CONFIRM_CONCURRENCY = 12
+
+# A word-overlap screen runs before SequenceMatcher. The edit-distance score is
+# the expensive part: 337 facts means ~56k pairs and ~25s of CPU. Pairs sharing
+# almost no words are the common false candidate (shared function words alone can
+# score 0.63 on the character ratio); measured on a Crocs run, a 0.12 floor left
+# 1,679 pairs to score instead of 56,616. A duplicate whose wording shares fewer
+# words than that is missed 鈥?which leaves a duplicate in the brief, never a fact
+# removed, the same direction every other dedup failure takes.
+WORD_OVERLAP_FLOOR = 0.10
 
 # Model verdicts, keyed on the normalised pair. A repeated run meets the same
 # syndicated sentences, and asking again is the same answer at full price while
-# a non-deterministic verdict changes the merged fact set — and with it the
+# a non-deterministic verdict changes the merged fact set 鈥?and with it the
 # evidence fingerprint that decides whether inference runs at all.
 MAX_VERDICT_CACHE = 4096
 _VERDICT_CACHE: dict[tuple[str, str], bool] = {}
@@ -61,13 +73,6 @@ def _remember_verdict(key: tuple[str, str], same: bool) -> None:
         # dict is all this cache needs to be.
         _VERDICT_CACHE.pop(next(iter(_VERDICT_CACHE)))
     _VERDICT_CACHE[key] = same
-
-# Confirmation batches run concurrently. Each batch is an independent model call,
-# so waiting for one before starting the next is pure latency: measured on a
-# Wipro run, 172 facts took 335 seconds in the merge stage alone — 64% of the
-# whole ingestion — because the anchor loop issued one confirmation round after
-# another.
-CONFIRM_CONCURRENCY = 8
 
 # Partners kept per fact in the global candidate pass. Without a per-fact bound
 # a page of near-identical syndicated sentences would post thousands of pairs;
@@ -202,6 +207,11 @@ def find_candidates(
     return pairs[:max_candidates]
 
 
+def _word_set(text: str) -> set[str]:
+    """All words of a normalized sentence, for the cheap pre-screen."""
+    return set(text.split())
+
+
 def find_candidates_global(
     facts: Sequence[str],
     *,
@@ -211,7 +221,7 @@ def find_candidates_global(
     """Return candidate pairs across the whole set, strongest first.
 
     The previous merge walked one anchor at a time and asked the model about its
-    partners, then re-asked about the remaining ones after every accept — one
+    partners, then re-asked about the remaining ones after every accept 鈥?one
     model round per accepted fact, which is where 335 seconds went on a 172-fact
     run. The pairs do not depend on the merge order, so they are all proposed
     once and confirmed in parallel; the grouping is then a union-find over the
@@ -224,10 +234,18 @@ def find_candidates_global(
     scored: List[CandidatePair] = []
     # Normalize once per fact: the pairwise loop is quadratic, and normalizing
     # inside it re-ran the regexes on every partner (every fact was normalized
-    # n-1 times).
+    # n-1 times). Word sets screen the pair before the edit-distance score, which
+    # is where the seconds go.
     normalized = [normalize(text) for text in facts]
+    word_sets = [_word_set(text) for text in normalized]
     for left in range(len(facts)):
         for right in range(left + 1, len(facts)):
+            left_words, right_words = word_sets[left], word_sets[right]
+            union = len(left_words | right_words)
+            if not union:
+                continue
+            if len(left_words & right_words) / union < WORD_OVERLAP_FLOOR:
+                continue
             score = _similarity_normalized(normalized[left], normalized[right])
             if score >= threshold:
                 scored.append(
@@ -317,6 +335,7 @@ async def confirm_same_facts(
                     ],
                     response_format={"type": "json_object"},
                     temperature=0.0,
+                    max_tokens=1024,
                     **no_reasoning(),
                 )
                 content = response.choices[0].message.content or ""
@@ -360,7 +379,7 @@ async def merge_duplicate_facts(
     ``protected`` is the number of leading facts already stored from an earlier
     run. Pairs between two protected facts are not re-asked: those facts were
     merged when they were stored, and asking the model about them again produced
-    different verdicts on a later run — which changed the merged fact set, and
+    different verdicts on a later run 鈥?which changed the merged fact set, and
     with it the evidence fingerprint that decides whether inference runs at all.
 
     Returns the merged list and counters describing what happened.
@@ -370,7 +389,7 @@ async def merge_duplicate_facts(
         return list(facts), stats
 
     texts = [item.content for item in facts]
-    # The candidate pass is O(n²) SequenceMatcher work: run it off the event
+    # The candidate pass is O(n虏) SequenceMatcher work: run it off the event
     # loop, otherwise the CPU bound blocks every other stage of the ingestion
     # (the same reason body extraction moved to a worker pool).
     pairs = await asyncio.to_thread(find_candidates_global, texts)
@@ -447,8 +466,8 @@ async def drop_duplicate_facts(
 
     Used to check incidental mentions against the fact base: a one-line mention
     that says the same thing as a stored fact adds nothing, so it is dropped.
-    Runs in two stages — a lexical score proposes pairs, the model confirms
-    which are actually the same — and nothing is dropped without confirmation.
+    Runs in two stages 鈥?a lexical score proposes pairs, the model confirms
+    which are actually the same 鈥?and nothing is dropped without confirmation.
     """
     pairs = find_candidates(existing, incoming)
     if not pairs:
