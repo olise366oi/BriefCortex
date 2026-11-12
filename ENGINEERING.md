@@ -80,8 +80,8 @@ was never looked up at all.
 
 ### 3.2b Where retrieval stops
 
-Four bounds, whichever fires first. The one that actually fires is diminishing
-returns, not the round cap.
+Five bounds, whichever fires first. On a rich opening the richness cap fires
+first; otherwise diminishing returns does, not the round cap.
 
 | Bound | Constant | Value |
 |---|---|---|

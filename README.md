@@ -303,8 +303,9 @@ The tail is now capped by opening size and stops after a round adding fewer than
 `LOW_YIELD_NEW_URLS`. Toro: opening 117 usable, one follow-up adding 2, search
 finished in 31s where it used to take 50–52s.
 
-The loop exits on whichever bound is reached first, and it is the **diminishing-returns
-bound that actually fires**. Measured on a real four-lane run (28 planned queries):
+The loop exits on whichever bound is reached first. On a rich opening the
+**richness cap** fires first; on a thin one, diminishing returns does. Measured
+on a real four-lane run (28 planned queries) before that cap existed:
 
 | Round | Queries | Usable | New URLs | Running total |
 |---|---|---|---|---|
