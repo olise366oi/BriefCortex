@@ -7,7 +7,11 @@ the client. Keeping them here means a new caller does not have to copy any of it
 """
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+import asyncio
+import os
+from contextlib import asynccontextmanager
+from typing import Any, Dict, Optional, Tuple
+from weakref import WeakKeyDictionary
 
 from openai import (
     APIConnectionError,
@@ -50,6 +54,76 @@ class LLMUnavailableError(RuntimeError):
 # stale cached connection.
 _CLIENT_CACHE: Dict[tuple, AsyncOpenAI] = {}
 
+# One process-wide cap on in-flight model calls. Each fan-out stage has its own
+# bound (dedup 8, subject 6, date recovery 16), but those bounds are per stage:
+# once stages run concurrently their peaks add up and the provider sees the sum.
+# This is the only cap that sees every caller, and it is what keeps a parallel
+# ingestion from turning into a burst of 429s.
+MAX_CONCURRENT_LLM_CALLS = int(os.getenv("LLM_MAX_CONCURRENCY", "12"))
+
+_LIMITERS: "WeakKeyDictionary[Any, asyncio.Semaphore]" = WeakKeyDictionary()
+
+
+def _limiter() -> asyncio.Semaphore:
+    """Return the model-call limiter for the running event loop.
+
+    Keyed on the loop rather than created once per process: tests and CLI
+    one-shots run several loops in one process, and an asyncio primitive used
+    under a loop other than its own fails.
+    """
+    loop = asyncio.get_running_loop()
+    limiter = _LIMITERS.get(loop)
+    if limiter is None:
+        limiter = asyncio.Semaphore(MAX_CONCURRENT_LLM_CALLS)
+        _LIMITERS[loop] = limiter
+    return limiter
+
+
+@asynccontextmanager
+async def llm_slot():
+    """Hold one model-call slot for the duration of one request."""
+    async with _limiter():
+        yield
+
+
+class _LimitedCompletions:
+    """``client.chat.completions`` with every call taking a slot first."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    async def create(self, *args: Any, **kwargs: Any) -> Any:
+        async with llm_slot():
+            return await self._inner.create(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class _LimitedChat:
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.completions = _LimitedCompletions(inner.completions)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class _LimitedClient:
+    """An ``AsyncOpenAI`` whose completions share the process-wide cap.
+
+    Wrapping rather than editing every call site keeps the cap honest: a stage
+    added later inherits it automatically, and every existing caller keeps its
+    shape.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.chat = _LimitedChat(inner.chat)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
 
 def is_permanent_error(exc: Exception) -> bool:
     """True when retrying the same request cannot possibly succeed."""
@@ -77,7 +151,7 @@ def is_retryable_error(exc: Exception) -> bool:
     )
 
 
-def build_client() -> Tuple[AsyncOpenAI, str]:
+def build_client() -> Tuple[Any, str]:
     """Build an async OpenAI-compatible client from Settings.
 
     Configuration priority:
@@ -104,8 +178,8 @@ def build_client() -> Tuple[AsyncOpenAI, str]:
     else:
         client = AsyncOpenAI(api_key=api_key)
 
-    _CLIENT_CACHE[cache_key] = client
-    return client, model
+    _CLIENT_CACHE[cache_key] = _LimitedClient(client)
+    return _CLIENT_CACHE[cache_key], model
 
 
 def _resolve_route() -> Tuple[str, str, str, Optional[str]]:

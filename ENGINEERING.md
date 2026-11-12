@@ -478,6 +478,14 @@ immediately; validation, connection, timeout and rate-limit retry. A schema miss
 feeds the error back into the conversation, because a plain retry would resend the
 same prompt and repeat the same mistake.
 
+Every completion also takes a slot from one **process-wide** semaphore
+(`MAX_CONCURRENT_LLM_CALLS`, default 12, overridable with `LLM_MAX_CONCURRENCY`).
+Per-stage bounds are not enough on their own: dedup 8, subject 6 and date
+recovery 16 are each reasonable, but once the parallel stages run together the
+provider sees their sum. The limiter is created per event loop, because tests and
+one-shot CLIs run several loops in one process and an asyncio primitive from a
+previous loop fails on the next one.
+
 ## 10. Configuration
 
 `core/config.py`. `.env` wins over `.env.example`, and real environment variables

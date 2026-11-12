@@ -460,6 +460,7 @@ The repo ships with `pytest` coverage for the prompt/schema contract, the confli
 - Two distinct facts sharing an opening clause are both kept; only a long word-for-word extension replaces the shorter telling.
 - A deduplicated chain collapses transitively, the fuller telling wins, every source survives, and nothing merges without the model's confirmation.
 - Subject routing and semantic deduplication are asserted to run their batches concurrently, and a failed subject batch degrades only that batch.
+- The process-wide model-call cap bounds total in-flight calls, and a failed call returns its slot.
 - The cache TTL classifies evidence by whole word, so `third quarter` is not read as a hiring signal.
 
 ---
@@ -535,7 +536,7 @@ BriefCortex/
 | `services/gateway_plugin.py` | Briefing-shaped gateway decision: one `GatewayDecision` per request |
 | `services/conflict_detection.py` | Deterministic in-report conflict lane, on the shared rule table |
 | `services/bifrost_headers.py` | Content-aware cache headers, wrapping the standalone policy package |
-| `services/llm_client.py` | Provider selection, retry policy, and the cached client every caller shares |
+| `services/llm_client.py` | Provider selection, retry policy, the cached client every caller shares, and the process-wide model-call cap |
 | `services/keywords.py`, `urls.py`, `window.py` | Shared matchers, URL parsing, meeting-anchored window |
 | `services/tavily_search.py` | The single search call, dated and undated, plus targeted body extraction |
 | `services/logger_service.py` | Structured logging factory |
